@@ -1,0 +1,46 @@
+# Template for your own eval cases — copy to cases.yaml (gitignored) and replace with
+# questions about YOUR sessions. Mine ground truth from the transcripts FIRST (read
+# them, note evidence locations), then write the rubric. Design notes:
+#
+#   - Spread cases across question types (qtype) and difficulties — a benchmark of
+#     only needle questions won't exercise browse modes; only summaries won't
+#     exercise search. Types we used: needle (one specific fact), synthesis (one
+#     incident needing a few hits assembled), decision (a debated choice that
+#     flipped mid-thread), summary (whole-session understanding), meta (grounded
+#     retrospective), cross (facts spanning sessions/tools).
+#   - "hard" = paraphrase the question so its words do NOT appear verbatim in the
+#     transcript — that's what separates search strategy from string luck.
+#   - Rubric calibration: CORE facts (required — they prove the right evidence was
+#     retrieved) vs BONUS details (never required). A response fails only if a core
+#     fact is missing or contradicted. Keep the grader off length/style.
+#
+# Point the harness at your transcripts with:
+#   export SESSION_GREP_EVAL_FIXTURES=/path/to/your/transcripts   # dir of *.jsonl
+# then: node eval/loop.mjs --label "my baseline" --full
+
+- description: example-needle
+  vars:
+    id: example-needle
+    question: "What branch did the payment-retry work end up on, and did it get merged?"
+  assert:
+    - type: llm-rubric
+      value: >-
+        CORE (required): names the branch feat/payment-retry and says it was merged to
+        main after review.
+        BONUS (not required): the PR number; who reviewed it.
+        Fail only if a core fact is missing or contradicted.
+  metadata: { session: my-project-abc123, qtype: needle, difficulty: easy }
+
+- description: example-synthesis-hard
+  vars:
+    id: example-synthesis-hard
+    question: "Something kept silently swallowing errors in the worker — what was actually going on?"
+  assert:
+    - type: llm-rubric
+      value: >-
+        CORE (required): the worker's catch block logged at debug level (invisible in
+        prod) and re-queued the job, so failures looped silently; the fix raised the
+        log level and added a dead-letter queue.
+        BONUS (not required): the exact file; the retry count.
+        Fail only if a core fact is missing or contradicted.
+  metadata: { session: my-project-abc123, qtype: synthesis, difficulty: hard }

@@ -1,0 +1,54 @@
+# session-grep benchmark: can an agent equipped with session-grep answer nuanced
+# questions about past sessions at >=parity correctness while spending materially
+# fewer tokens than a naive-grep control?
+#
+# Matrix: 2 arms (session-grep | naive-grep) x 2 subject models (sonnet | haiku).
+# Models are pinned here on purpose — the benchmark must never inherit an expensive
+# interactive default. The grader is pinned separately (sonnet) in claude-grader.mjs.
+#
+# Run:   npm run eval               full matrix, all cases
+#        npm run eval:smoke         3 cases, haiku only — plumbing check
+#        promptfoo eval -c eval/promptfooconfig.yaml --filter-providers 'sonnet' ...
+# Then:  node eval/compare.mjs      the 50% efficiency gate + per-dimension breakdown
+#
+# Everything (subject agents + grader) runs through the local `claude` CLI, so the
+# harness needs Claude Code auth but no ANTHROPIC_API_KEY.
+#
+# Fresh clone: cases.yaml and fixtures are NOT distributed (they contain/derive from
+# private transcripts). Create yours first — see eval/README.md "Create and run your
+# own eval" and cases.example.yaml.
+
+description: session-grep vs naive grep — token efficiency at equal correctness
+
+prompts:
+  - '{{question}}'
+
+providers:
+  - id: file://providers/claude-agent.mjs
+    label: session-grep|sonnet
+    config: { arm: session-grep, model: claude-sonnet-5, maxTurns: 25, maxBudgetUsd: 1.0 }
+  - id: file://providers/claude-agent.mjs
+    label: naive-grep|sonnet
+    config: { arm: naive-grep, model: claude-sonnet-5, maxTurns: 25, maxBudgetUsd: 1.0 }
+  - id: file://providers/claude-agent.mjs
+    label: session-grep|haiku
+    config: { arm: session-grep, model: claude-haiku-4-5-20251001, maxTurns: 25, maxBudgetUsd: 1.0 }
+  - id: file://providers/claude-agent.mjs
+    label: naive-grep|haiku
+    config: { arm: naive-grep, model: claude-haiku-4-5-20251001, maxTurns: 25, maxBudgetUsd: 1.0 }
+
+defaultTest:
+  options:
+    provider: file://providers/claude-grader.mjs
+  assert:
+    - type: javascript
+      value: file://asserts/efficiency.mjs
+      metric: efficiency_telemetry
+
+tests: file://cases.yaml
+
+# Resolved from the process cwd (repo root via npm run), not this file's dir.
+outputPath: eval/results/latest.json
+
+evaluateOptions:
+  maxConcurrency: 2

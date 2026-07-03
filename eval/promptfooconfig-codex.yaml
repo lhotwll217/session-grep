@@ -1,0 +1,32 @@
+# Extension suite: codex-format + cross-source cases over the COMBINED fixture tree.
+# Run via `node eval/loop.mjs --suite codex` (which sets SESSION_GREP_EVAL_FIXTURES to
+# the full eval/fixtures tree). Separate corpus era — results are never compared
+# against the frozen main suite (see cases-codex.yaml header).
+
+description: session-grep extension suite — codex-format + cross-source retrieval
+
+prompts:
+  - '{{question}}'
+
+providers:
+  - id: file://providers/claude-agent.mjs
+    label: session-grep|haiku
+    config: { arm: session-grep, model: claude-haiku-4-5-20251001, maxTurns: 25, maxBudgetUsd: 1.0 }
+  - id: file://providers/claude-agent.mjs
+    label: naive-grep|haiku
+    config: { arm: naive-grep, model: claude-haiku-4-5-20251001, maxTurns: 25, maxBudgetUsd: 1.0 }
+
+defaultTest:
+  options:
+    provider: file://providers/claude-grader.mjs
+  assert:
+    - type: javascript
+      value: file://asserts/efficiency.mjs
+      metric: efficiency_telemetry
+
+tests: file://cases-codex.yaml
+
+outputPath: eval/results/latest.json
+
+evaluateOptions:
+  maxConcurrency: 2
