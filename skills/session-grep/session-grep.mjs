@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { configuredSourceOf, loadSessionSources } from './sources.mjs';
 
 const args = process.argv.slice(2);
 const opts = { limit: 20, before: 1, after: 1, role: 'all', source: 'all', sort: 'newest', json: false, regex: false, roots: [], maxChars: 8000 };
@@ -26,6 +27,7 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--skim') opts.skim = args[++i];
   else if (a === '--session') opts.session = args[++i];
   else if (a === '--at') opts.at = Number(args[++i]);
+  else if (a === '--list-roots') opts.listRoots = true;
   else if (a === '--self-test') opts.selfTest = true;
   else if (a === '--include-tools') opts.includeTools = true;
   else if (a === '--any') opts.any = true;
@@ -62,7 +64,7 @@ if (opts.selfTest) {
   process.exit(await selfTest());
 }
 if (opts.at != null && !opts.session) usage(1, '--at requires --session ID_PREFIX');
-if (!opts.query && !opts.overview && !opts.skim && !(opts.session && opts.at != null)) usage(1, 'Missing --query (or use --overview / --skim ID / --session ID --at INDEX)');
+if (!opts.query && !opts.overview && !opts.skim && !opts.listRoots && !(opts.session && opts.at != null)) usage(1, 'Missing --query (or use --overview / --skim ID / --session ID --at INDEX)');
 if (!Number.isFinite(opts.limit) || opts.limit < 1) usage(1, '--limit must be >= 1');
 if (!Number.isFinite(opts.maxChars) || opts.maxChars < 500) usage(1, '--max-chars must be >= 500');
 if (!Number.isFinite(opts.before) || opts.before < 0) usage(1, '--before must be >= 0');
@@ -88,22 +90,17 @@ if (opts.any) {
   if (!anyWords.length) usage(1, '--any needs at least one query word');
 }
 
-const home = os.homedir();
-
-// ─── SESSION_ROOTS — the folders this skill searches by default ─────────────
-// EDIT THIS on first use (or the agent running the skill should — see the
-// "Onboarding" section of SKILL.md, which lists known session homes per tool).
-// Any directory containing session *.jsonl files works. --root DIR overrides
-// per call without touching this.
-const SESSION_ROOTS = [
-  path.join(home, '.claude/projects'),           // Claude Code
-  path.join(home, '.codex/sessions'),            // Codex CLI
-  path.join(home, '.codex/archived_sessions'),   // Codex CLI (archived)
-];
-// ────────────────────────────────────────────────────────────────────────────
-
-const roots = (opts.roots.length ? opts.roots : SESSION_ROOTS).filter((dir) => fs.existsSync(dir));
-if (!roots.length) usage(1, 'No session roots found to search — edit SESSION_ROOTS at the top of this file (see SKILL.md "Onboarding") or pass --root DIR');
+// Session roots are local, per-environment routing config. Built-in defaults and
+// session_sources.json loading live in sources.mjs; parsing lives in adapters/.
+const sourceNames = Object.keys(ADAPTERS);
+const sourceMap = loadSessionSources({ knownSources: sourceNames, rootOverrides: opts.roots });
+const roots = sourceMap.roots.map((entry) => entry.root).filter((dir) => fs.existsSync(dir));
+if (opts.listRoots) {
+  console.log(`config=${sourceMap.configPath ?? '(none)'}`);
+  for (const entry of sourceMap.roots) console.log(`${entry.source}\texists=${fs.existsSync(entry.root)}\t${entry.root}`);
+  process.exit(0);
+}
+if (!roots.length) usage(1, 'No session roots found to search — add session_sources.json (see SKILL.md "Onboarding") or pass --root DIR');
 
 // Browse modes answer "which session?" and "what happened in it?" in one call each —
 // whole-thread questions shouldn't cost 20 grep probes. A skim substitutes for many
@@ -293,6 +290,8 @@ if (opts.json) {
 }
 
 function sourceOf(file) {
+  const configured = configuredSourceOf(file, sourceMap, sourceNames);
+  if (configured) return configured;
   for (const [name, adapter] of Object.entries(ADAPTERS)) {
     if (adapter.detect(file)) return name;
   }
@@ -336,7 +335,7 @@ function allSessionFiles() {
 // head/tail preserved and the middle sampled evenly to fit the output budget. Indexes
 // are printed so specifics can be drilled with a targeted --query afterwards.
 function browse() {
-  const files = allSessionFiles();
+  const files = allSessionFiles().filter((file) => opts.source === 'all' || sourceOf(file) === opts.source);
   if (opts.skim) {
     const file = files.find((f) => sessionId(f).startsWith(opts.skim));
     if (!file) usage(1, `No session file matching id prefix "${opts.skim}" under: ${roots.join(', ')}`);
@@ -388,6 +387,8 @@ function browse() {
     if (!messages.length) continue;
     const first = messages.find((m) => m.role === 'user') ?? messages[0];
     const times = messages.map((m) => timeOf(m.timestamp)).filter((t) => t != null);
+    const lastTime = times.length ? Math.max(...times) : fs.statSync(file).mtimeMs;
+    if (sinceTime != null && lastTime < sinceTime) continue;
     digests.push({
       id: sessionId(file),
       source,
@@ -398,7 +399,7 @@ function browse() {
       assistant: messages.filter((m) => m.role === 'assistant').length,
       mb: (raw.length / 1e6).toFixed(1),
       opening: truncate(first.text, 220),
-      lastTime: times.length ? Math.max(...times) : 0,
+      lastTime,
     });
   }
   digests.sort((a, b) => b.lastTime - a.lastTime);
@@ -445,7 +446,7 @@ function compileRegex(pattern, caseSensitive) {
 
 function usage(code, msg) {
   if (msg) console.error(msg);
-  console.error('Usage: session-grep.mjs --query TEXT [--any] [--regex] [--limit N] [--before N] [--after N] [--role user|assistant|all] [--source claude|codex|all] [--since today|Nd|YYYY-MM-DD] [--sort newest|oldest|file] [--root DIR ...] [--max-chars N] [--include-tools] [--case-sensitive] [--json] | --overview | --skim ID | --session ID --at INDEX | --self-test');
+  console.error('Usage: session-grep.mjs --query TEXT [--any] [--regex] [--limit N] [--before N] [--after N] [--role user|assistant|all] [--source claude|codex|all] [--since today|Nd|YYYY-MM-DD] [--sort newest|oldest|file] [--root DIR ...] [--max-chars N] [--include-tools] [--case-sensitive] [--json] | --overview | --skim ID | --session ID --at INDEX | --list-roots | --self-test');
   process.exit(code);
 }
 
@@ -479,8 +480,17 @@ async function selfTest() {
   const codexLine = (role, t, ts) => JSON.stringify({ type: 'response_item', timestamp: ts, payload: { type: 'message', role, content: [{ type: 'output_text', text: t }] } }) + '\n';
   fs.writeFileSync(path.join(dir, 'codex', 'rollout-cccc.jsonl'),
     codexLine('assistant', 'zorptastic reply straight from the codex adapter', '2026-06-07T08:00:00Z'));
+  // Same Codex format under a root whose path does not reveal the format. This
+  // exercises session_sources.json as the source of truth for parser selection.
+  fs.mkdirSync(path.join(dir, 'relocated'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'relocated', 'rollout-dddd.jsonl'),
+    codexLine('assistant', 'relocatedsource reply from a configured codex root', '2026-06-08T08:00:00Z'));
 
-  const run = (args) => execFileSync(process.execPath, [self, ...args, '--root', dir], { encoding: 'utf8' });
+  const runRaw = (args, env = {}) => execFileSync(process.execPath, [self, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, ...env },
+  });
+  const run = (args) => runRaw([...args, '--root', dir]);
   let n = 0;
   const failures = [];
   const check = (name, cond) => { n++; if (!cond) failures.push(name); };
@@ -520,6 +530,10 @@ async function selfTest() {
     // overview + spine
     const ov = run(['--overview']);
     check('overview lists both sessions', ov.includes('aaaa1111') && ov.includes('bbbb2222'));
+    const ovCodex = run(['--overview', '--source', 'codex']);
+    check('overview honors --source', ovCodex.includes('rollout-cccc') && !ovCodex.includes('aaaa1111') && !ovCodex.includes('bbbb2222'));
+    const ovRecent = run(['--overview', '--since', '2026-06-06']);
+    check('overview honors --since', ovRecent.includes('rollout-cccc') && !ovRecent.includes('aaaa1111') && !ovRecent.includes('bbbb2222'));
     const spine = run(['--skim', 'aaaa1111', '--max-chars', '900']);
     check('skim within budget (+slack)', spine.length <= 1400);
     check('skim keeps head', spine.includes('number 0'));
@@ -534,6 +548,15 @@ async function selfTest() {
     check('codex adapter parses', cx.totalMatches === 1 && cx.matches[0].source === 'codex');
     const cxOnly = JSON.parse(run(['--query', 'zorptastic', '--source', 'claude', '--json']));
     check('--source filters by adapter', cxOnly.totalMatches === 0);
+    const sourcesFile = path.join(dir, 'session_sources.json');
+    fs.writeFileSync(sourcesFile, JSON.stringify({
+      disable: ['claude', 'codex'],
+      add: [{ source: 'codex', root: path.join(dir, 'relocated') }],
+    }));
+    const configured = JSON.parse(runRaw(['--query', 'relocatedsource', '--json'], { SESSION_GREP_SOURCES_FILE: sourcesFile }));
+    check('session_sources config adds roots', configured.totalMatches === 1 && configured.matches[0].source === 'codex');
+    const listed = runRaw(['--list-roots'], { SESSION_GREP_SOURCES_FILE: sourcesFile });
+    check('--list-roots shows configured root', listed.includes(`config=${sourcesFile}`) && listed.includes(path.join(dir, 'relocated')));
 
     // pointer drill-in: consume a hit's id+idx via --session/--at
     const hit = JSON.parse(run(['--query', 'flumoxide', '--json'])).matches[0];

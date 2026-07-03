@@ -1,6 +1,6 @@
 {
   "name": "session-grep",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Grep AI coding-session transcripts (Claude Code, Codex) with bounded message context — built for agents. Includes rarity-ranked multi-word search, session overviews, sampled spines, and a built-in self-test.",
   "type": "module",
   "bin": {
@@ -8,7 +8,8 @@
   },
   "files": [
     "bin/",
-    "skills/"
+    "skills/",
+    "session_sources.example.json"
   ],
   "scripts": {
     "eval": "promptfoo eval -c eval/promptfooconfig.yaml --no-cache",

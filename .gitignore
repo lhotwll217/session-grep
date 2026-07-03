@@ -1,5 +1,7 @@
 node_modules/
 .env
+session_sources.json
+.session-grep/
 *.log
 .promptfoo/
 

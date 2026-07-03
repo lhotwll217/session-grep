@@ -16,7 +16,7 @@ returns ranked hits with a hard output budget.
 npx skills add lhotwll217/session-grep                    # as an agent skill
 npx session-grep --query "why did you" --since 7d         # as a CLI, no install
 npm i -g session-grep                                     # or global
-npx session-grep --self-test                              # verify: 22 built-in assertions
+npx session-grep --self-test                              # verify: built-in assertions
 ```
 
 Needs Node ≥ 20 and ripgrep. The skill is the [skills/session-grep/](skills/session-grep/)
@@ -31,10 +31,30 @@ session-grep --query "task_started" --before 2 --after 2      # exact term, boun
 session-grep --query "sidebar poll triage membership" --any   # multi-word: rarity-ranked, per-word hit counts
 session-grep --overview                                       # one-line digest per session
 session-grep --skim 269a                                     # one session's conversation, sampled to budget
+session-grep --list-roots                                    # show configured source roots
 ```
 
 Searches `~/.claude/projects` and `~/.codex/sessions` by default; `--root DIR` points
-anywhere. Full flags and agent guidance: [skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
+anywhere. If sessions live elsewhere, add known-format roots with
+local `session_sources.json` config; start from
+[`session_sources.example.json`](session_sources.example.json) and keep the real file
+uncommitted. See [skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
+Full flags and agent guidance: [skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
+
+## Sources
+
+`session_sources.json` is local routing config, like `.env`: keep it uncommitted and
+use it to point supported parsers at machine-specific directories. It maps parser names
+such as `claude` or `codex` to roots; adding a new transcript format still requires an
+adapter in `skills/session-grep/adapters/`. The built-in default map and config loader
+live in `skills/session-grep/sources.mjs`.
+
+Start from [`session_sources.example.json`](session_sources.example.json), then copy or
+adapt it as `session_sources.json` in the project root, `./.session-grep/`, or your
+home-level session-grep config directory.
+
+Planned adapter targets include opencode, Pi, Gemini CLI, Cursor, and other agent
+harnesses with durable local transcripts.
 
 ## Benchmark
 

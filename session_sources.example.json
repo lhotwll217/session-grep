@@ -1,0 +1,13 @@
+{
+  "disable": [],
+  "add": [
+    {
+      "source": "codex",
+      "root": "~/path/to/codex/sessions"
+    },
+    {
+      "source": "claude",
+      "root": "~/path/to/claude/projects"
+    }
+  ]
+}
