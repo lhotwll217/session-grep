@@ -115,7 +115,6 @@ const artifacts = {
     path.join(repoRoot, 'bin', 'session-grep.mjs'),
     path.join(skillDir, 'session-grep.mjs'),
     path.join(skillDir, 'sources.mjs'),
-    path.join(skillDir, 'session_sources.json'),
     ...adapterFiles,
   ]),
   skill: md5(path.join(skillDir, 'SKILL.md')),

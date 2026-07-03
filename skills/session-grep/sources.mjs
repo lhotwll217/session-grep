@@ -6,40 +6,17 @@ function expandHome(p, home) {
   return p.startsWith('~/') ? path.join(home, p.slice(2)) : p;
 }
 
-function sourceConfigPaths({ env, cwd, home }) {
-  if (env.SESSION_GREP_SOURCES_FILE) return [env.SESSION_GREP_SOURCES_FILE];
-  return [
-    path.join(cwd, 'session_sources.json'),
-    path.join(cwd, '.session-grep/session_sources.json'),
-    env.SESSION_GREP_HOME && path.join(env.SESSION_GREP_HOME, 'session_sources.json'),
-    path.join(home, '.session-grep/session_sources.json'),
-  ].filter(Boolean);
-}
-
 function readJson(file) {
+  if (!fs.existsSync(file)) return { exists: false, config: null };
   try {
-    if (fs.existsSync(file)) return { path: file, config: JSON.parse(fs.readFileSync(file, 'utf8')) || null };
+    return { exists: true, config: JSON.parse(fs.readFileSync(file, 'utf8')) };
   } catch {
-    return { path: file, config: null };
+    return { exists: true, config: null }; // present but unparseable
   }
-  return { path: null, config: null };
-}
-
-function readLocalConfig(options) {
-  for (const file of sourceConfigPaths(options)) {
-    const result = readJson(file);
-    if (result.path) return result;
-  }
-  return { path: null, config: null };
-}
-
-function rootEntries(config) {
-  if (Array.isArray(config)) return config;
-  if (Array.isArray(config?.roots)) return config.roots;
-  return [];
 }
 
 function normalizeEntries(entries, known, home) {
+  if (!Array.isArray(entries)) return [];
   return entries.flatMap((entry) => {
     const type = entry?.type ?? entry?.source;
     if (!known.has(type) || typeof entry?.root !== 'string' || !entry.root.trim()) return [];
@@ -57,36 +34,36 @@ function dedupe(roots) {
   });
 }
 
+// Resolve the roots to search. Precedence: --root flags > $SESSION_GREP_SOURCES_FILE
+// (a JSON array of { type, root }) > the built-in DEFAULT_SOURCES passed by the caller.
+// There is no cwd/project discovery: session transcripts live under $HOME per user, not
+// per project, so a bespoke store is either a --root for one call, an edit to the
+// built-in defaults (the skill is vendored via `npx skills add`), or the env override.
 export function loadSessionSources({
   knownSources,
+  defaultSources = [],
   rootOverrides = [],
   env = process.env,
-  cwd = process.cwd(),
   home = os.homedir(),
-  defaultConfigPath,
 } = {}) {
-  if (rootOverrides.length) {
-    return { defaultPath: null, configPath: null, roots: rootOverrides.map((root) => ({ type: 'auto', root })) };
-  }
-
   const known = new Set(knownSources ?? []);
-  const defaults = normalizeEntries(rootEntries(readJson(defaultConfigPath).config), known, home);
-  const { path: configPath, config } = readLocalConfig({ env, cwd, home });
-  // A config file that is present but unparseable (or literal null/empty) must not
-  // silently masquerade as "no override" — that hands the user the shipped defaults
-  // while they believe their edits took effect. Surface it so callers can warn.
-  const configError = Boolean(configPath) && config == null;
-  let roots = defaults;
 
-  if (Array.isArray(config) || Array.isArray(config?.roots)) {
-    roots = normalizeEntries(rootEntries(config), known, home);
-  } else if (config && typeof config === 'object') {
-    const disable = new Set((Array.isArray(config.disable) ? config.disable : []).filter((s) => typeof s === 'string'));
-    roots = defaults.filter((r) => !disable.has(r.type));
-    roots.push(...normalizeEntries(Array.isArray(config.add) ? config.add : [], known, home));
+  if (rootOverrides.length) {
+    return { origin: 'flags', configPath: null, configError: null, roots: rootOverrides.map((root) => ({ type: 'auto', root })) };
   }
 
-  return { defaultPath: defaultConfigPath ?? null, configPath, configError, roots: dedupe(roots) };
+  const defaults = dedupe(normalizeEntries(defaultSources, known, home));
+  const configPath = env.SESSION_GREP_SOURCES_FILE || null;
+  if (!configPath) return { origin: 'defaults', configPath: null, configError: null, roots: defaults };
+
+  const { exists, config } = readJson(configPath);
+  // A broken override must not silently masquerade as "no override": it would hand the
+  // user the built-in defaults while they believe their file took effect. Report why.
+  if (!exists) return { origin: 'defaults', configPath, configError: 'missing', roots: defaults };
+  if (config === null) return { origin: 'defaults', configPath, configError: 'unparseable', roots: defaults };
+  if (!Array.isArray(config)) return { origin: 'defaults', configPath, configError: 'not-an-array', roots: defaults };
+
+  return { origin: 'config', configPath, configError: null, roots: dedupe(normalizeEntries(config, known, home)) };
 }
 
 export function configuredSourceOf(file, sourceMap, knownSources) {

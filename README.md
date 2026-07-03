@@ -35,39 +35,38 @@ session-grep --list-roots                                    # show configured s
 ```
 
 Searches `~/.claude/projects` and `~/.codex/sessions` by default; `--root DIR` points
-anywhere. If sessions live elsewhere, add known-format roots with
-local `session_sources.json` config and keep that file uncommitted. See
-[skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
-Full flags and agent guidance: [skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
+anywhere. If sessions live elsewhere, see Sources below. Full flags and agent
+guidance: [skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
 
 ## Sources
 
-`session_sources.json` is local routing config, like `.env`: keep it uncommitted and
-use it to point supported parsers at machine-specific directories. It maps `type`
-values such as `claude` or `codex` to roots; `type` is the adapter key. The shipped
-defaults live in `skills/session-grep/session_sources.json`, and the config loader
-lives in `skills/session-grep/sources.mjs`. Adding a new transcript format still
-requires an adapter in `skills/session-grep/adapters/`.
+The defaults are the `DEFAULT_SOURCES` constant in
+[`skills/session-grep/session-grep.mjs`](skills/session-grep/session-grep.mjs) —
+the standard per-user homes for each supported tool. Transcripts live under `$HOME`
+per user, not per project, so there is no project-local config to discover; roots
+that don't exist are skipped, and zero config works out of the box. Three ways to
+search elsewhere, in precedence order:
 
-Local `session_sources.json` files can either replace the shipped list with an array:
+1. **`--root DIR`** — per call, format auto-detected. Repeatable.
+2. **`$SESSION_GREP_SOURCES_FILE`** — path to a JSON array of `{ type, root }` that
+   replaces the defaults for that run (the override hook for a global/npx install you
+   don't edit, and for CI):
 
-```json
-[
-  { "type": "codex", "root": "~/alt/codex/sessions" }
-]
-```
+   ```json
+   [
+     { "type": "codex", "root": "~/alt/codex/sessions" }
+   ]
+   ```
 
-or patch it with `disable` and `add`:
+3. **Edit `DEFAULT_SOURCES`** — the skill is vendored into your repo via
+   `npx skills add`, so the file is yours. Supporting a new tool means adding an
+   adapter in `skills/session-grep/adapters/` and a line here; commit both.
 
-```json
-{
-  "disable": ["codex"],
-  "add": [{ "type": "codex", "root": "~/alt/codex/sessions" }]
-}
-```
-
-Planned adapter targets include opencode, Pi, Gemini CLI, Cursor, and other agent
-harnesses with durable local transcripts.
+`type` selects the parser, so a relocated store doesn't need the tool's name in its
+path. A missing, unparseable, or non-array override warns on stderr and falls back to
+the defaults (`--list-roots` shows `config_error=true`). Planned adapter targets
+include opencode, Pi, Gemini CLI, Cursor, and other agent harnesses with durable
+local transcripts.
 
 ## Benchmark
 
