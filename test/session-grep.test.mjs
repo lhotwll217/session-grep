@@ -9,13 +9,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const GREP = join(here, '..', '..', 'bin', 'session-grep.mjs');
+const GREP = join(here, '..', 'bin', 'session-grep.mjs');
 const hasRg = spawnSync('rg', ['--version'], { stdio: 'ignore' }).status === 0;
 
 const claudeLine = (role, text, ts) =>
   JSON.stringify({ type: role, timestamp: ts, message: { role, content: [{ type: 'text', text }] } }) + '\n';
 
-test('built-in self-test (18 assertions: any/IDF, budgets, spine, regex fallback, tool filtering)', { skip: !hasRg && 'ripgrep not installed' }, () => {
+test('built-in self-test passes', { skip: !hasRg && 'ripgrep not installed' }, () => {
   const out = execFileSync(process.execPath, [GREP, '--self-test'], { encoding: 'utf8' });
   assert.match(out, /self-test: ok/);
 });

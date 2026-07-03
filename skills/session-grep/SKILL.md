@@ -12,10 +12,16 @@ punctuation/common phrases, or when you need a simple pattern like hashtags.
 
 ## Onboarding (first use)
 
-The folders searched by default live in the `SESSION_ROOTS` variable at the top of
-the script. On first use, check it matches where this machine's sessions
-actually live, and edit it if not — ask the user which tools' history they want
-searchable. Known session homes:
+The folders searched by default are the `DEFAULT_SOURCES` constant near the top of
+`session-grep.mjs` — the standard per-user homes for each supported tool. Roots that
+don't exist are skipped, so zero config works out of the box. On first use, run:
+
+```bash
+node session-grep.mjs --list-roots
+```
+
+Confirm it matches where this machine's sessions actually live. Known session
+homes:
 
 | tool | home | format |
 |---|---|---|
@@ -25,9 +31,39 @@ searchable. Known session homes:
 | Gemini CLI | `~/.gemini/tmp` | json (not yet parseable) |
 | opencode | `~/.local/share/opencode/storage` | split json (not yet parseable) |
 
+Hosts and launchers are not transcript formats. Roots are keyed by adapter `type`
+(`claude`, `codex`) and directory.
+
 Quick existence check: `ls -d ~/.claude/projects ~/.codex/sessions 2>/dev/null`.
-Any directory of session `*.jsonl` files can be added to `SESSION_ROOTS`; `--root DIR`
-overrides per call without editing anything.
+There are three ways to search somewhere other than the defaults, in order of
+precedence:
+
+1. `--root DIR` — per call, no config; format auto-detected. Repeatable.
+2. `$SESSION_GREP_SOURCES_FILE` — path to a JSON array of `{ type, root }` that
+   *replaces* the defaults for that run. The single override hook for a global/npx
+   install you don't edit, and for CI.
+3. Edit `DEFAULT_SOURCES` in `session-grep.mjs` — the skill is vendored into your
+   repo via `npx skills add`, so this file is yours. Adding a bespoke tool means
+   dropping an adapter in `adapters/` and adding a line here; commit both.
+
+The override file is a plain array:
+
+```json
+[
+  { "type": "codex", "root": "~/alt/codex/sessions" }
+]
+```
+
+`type` must be an adapter that session-grep supports (`claude` or `codex` today) —
+it selects the parser, so a relocated Codex store does not need `codex` in its path.
+An override is authoritative: it does not teach a new format, only routes a known
+parser at a directory. If `$SESSION_GREP_SOURCES_FILE` points at a missing,
+unparseable, or non-array file, session-grep warns on stderr and falls back to the
+built-in defaults rather than failing silently — `--list-roots` reports
+`config_error=true` in that case.
+
+The default routes live in `DEFAULT_SOURCES`, the source resolver lives in
+`sources.mjs`, and parser implementations live in `adapters/`.
 
 Format support lives in the `adapters/` folder next to the script — one file per
 tool, each exporting `{name, detect(file), message(record, opts)}`. Supporting a
@@ -60,6 +96,7 @@ node session-grep.mjs --query "why did you" --since 7d --limit 12 --before 2 --a
 node session-grep.mjs --query "sidebar poll triage membership" --any     # multi-word: any-word match, rarity-ranked
 node session-grep.mjs --overview                                          # digest of every session
 node session-grep.mjs --skim 269a --max-chars 12000                      # one session's conversation, sampled
+node session-grep.mjs --list-roots                                        # show the source/root map being searched
 node session-grep.mjs --regex --query "#[A-Za-z0-9_][A-Za-z0-9_-]*" --since 7d --limit 20
 ```
 
@@ -86,11 +123,12 @@ Common flags:
 - `--since today|Nd|YYYY-MM-DD` filter by message/session timestamp
 - `--sort newest|oldest|file` output order, default `newest`
 - `--root DIR` search this directory of `*.jsonl` transcripts instead of the default live stores (repeatable)
+- `--list-roots` print the configured source/root map and whether each root exists
 - `--max-chars N` output budget, default 8000 — excess hits are omitted with a notice, never dumped
 - `--include-tools` also match inside tool_result blocks (excluded by default: they are file/command echoes, ~45% of bytes, and mostly restate the conversation)
 - `--case-sensitive` exact case match, useful for all-caps searches
 - `--json` machine-readable output (compact, same truncation and budget as text)
-- `--self-test` verify the tool against a built-in synthetic corpus (20 assertions, no dependencies) — run this after copying the skill anywhere
+- `--self-test` verify the tool against a built-in synthetic corpus (no dependencies) — run this after copying the skill anywhere
 
 ## Output rules
 

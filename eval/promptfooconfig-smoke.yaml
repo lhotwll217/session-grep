@@ -1,0 +1,27 @@
+# Release smoke: session-grep arm only, over the local ignored cases/fixtures.
+# This is a plumbing/regression check, not the two-arm benchmark.
+
+description: session-grep release smoke
+
+prompts:
+  - '{{question}}'
+
+providers:
+  - id: file://providers/claude-agent.mjs
+    label: session-grep|haiku
+    config: { arm: session-grep, model: claude-haiku-4-5-20251001, maxTurns: 25, maxBudgetUsd: 1.0 }
+
+defaultTest:
+  options:
+    provider: file://providers/claude-grader.mjs
+  assert:
+    - type: javascript
+      value: file://asserts/efficiency.mjs
+      metric: efficiency_telemetry
+
+tests: file://cases.yaml
+
+outputPath: eval/results/smoke-latest.json
+
+evaluateOptions:
+  maxConcurrency: 2
