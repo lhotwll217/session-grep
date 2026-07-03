@@ -89,9 +89,35 @@ const runId = ts.replace(/[:.]/g, '-').slice(0, 19);
 const md5 = (p) => {
   try { return createHash('md5').update(fs.readFileSync(p)).digest('hex').slice(0, 12); } catch { return null; }
 };
+const md5Many = (paths, base = repoRoot) => {
+  const h = createHash('md5');
+  let found = false;
+  for (const p of paths) {
+    try {
+      h.update(path.relative(base, p).split(path.sep).join('/'));
+      h.update('\0');
+      h.update(fs.readFileSync(p));
+      h.update('\0');
+      found = true;
+    } catch {
+      // Missing private artifacts, such as cases.yaml in a fresh clone, hash as null.
+    }
+  }
+  return found ? h.digest('hex').slice(0, 12) : null;
+};
+const skillDir = path.join(repoRoot, 'skills', 'session-grep');
+const adapterFiles = fs.readdirSync(path.join(skillDir, 'adapters'))
+  .filter((f) => f.endsWith('.mjs'))
+  .sort()
+  .map((f) => path.join(skillDir, 'adapters', f));
 const artifacts = {
-  tool: md5(path.join(repoRoot, 'bin', 'session-grep.mjs')),
-  skill: md5(path.join(repoRoot, 'SKILL.md')),
+  tool: md5Many([
+    path.join(repoRoot, 'bin', 'session-grep.mjs'),
+    path.join(skillDir, 'session-grep.mjs'),
+    path.join(skillDir, 'sources.mjs'),
+    ...adapterFiles,
+  ]),
+  skill: md5(path.join(skillDir, 'SKILL.md')),
   provider: md5(path.join(here, 'providers', 'claude-agent.mjs')),
   cases: md5(path.join(here, 'cases.yaml')),
   git: (spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).stdout ?? '').trim() || null,
