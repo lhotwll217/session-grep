@@ -12,10 +12,11 @@ punctuation/common phrases, or when you need a simple pattern like hashtags.
 
 ## Onboarding (first use)
 
-The folders searched by default come from built-in parser defaults plus an
-optional local `session_sources.json` override. Treat `session_sources.json`
-like `.env`: it is per-person/per-environment configuration, not a committed
-project file. On first use, run:
+The folders searched by default come from the shipped
+`skills/session-grep/session_sources.json` plus an optional local
+`session_sources.json` override. Treat local `session_sources.json` like `.env`:
+it is per-person/per-environment configuration, not a committed project file.
+On first use, run:
 
 ```bash
 node session-grep.mjs --list-roots
@@ -33,13 +34,11 @@ homes:
 | opencode | `~/.local/share/opencode/storage` | split json (not yet parseable) |
 
 Hosts and launchers are not transcript formats. Configure transcript roots by
-parser source (`claude`, `codex`) and directory.
+adapter `type` (`claude`, `codex`) and directory.
 
 Quick existence check: `ls -d ~/.claude/projects ~/.codex/sessions 2>/dev/null`.
 Any directory of supported session `*.jsonl` files can be added via a local
 `session_sources.json`; `--root DIR` overrides per call without editing anything.
-The repo includes `session_sources.example.json` as a copyable template; keep the
-real `session_sources.json` uncommitted.
 Config lookup order:
 
 1. `$SESSION_GREP_SOURCES_FILE`
@@ -48,24 +47,32 @@ Config lookup order:
 4. `$SESSION_GREP_HOME/session_sources.json`
 5. `~/.session-grep/session_sources.json`
 
-Config shape:
+Local configs can replace the shipped list with an array:
+
+```json
+[
+  { "type": "codex", "root": "~/alt/codex/sessions" }
+]
+```
+
+or patch the shipped list with `disable` and `add`:
 
 ```json
 {
   "disable": ["codex"],
   "add": [
-    { "source": "codex", "root": "~/alt/codex/sessions" }
+    { "type": "codex", "root": "~/alt/codex/sessions" }
   ]
 }
 ```
 
-`source` must be a parser that session-grep supports (`claude` or `codex` today).
+`type` must be an adapter that session-grep supports (`claude` or `codex` today).
 The config maps known parsers to local directories; it does not teach a new file
-format. For configured roots, `source` is authoritative for parsing, so a moved
-Codex directory does not need `codex` in its path.
+format. For configured roots, `type` is authoritative for parsing, so a moved Codex
+directory does not need `codex` in its path.
 
-The built-in source defaults and local config loader live in `sources.mjs`; parser
-implementations live in `adapters/`.
+The shipped default routes live in `session_sources.json`, the local config loader
+lives in `sources.mjs`, and parser implementations live in `adapters/`.
 
 Format support lives in the `adapters/` folder next to the script — one file per
 tool, each exporting `{name, detect(file), message(record, opts)}`. Supporting a
@@ -130,7 +137,7 @@ Common flags:
 - `--include-tools` also match inside tool_result blocks (excluded by default: they are file/command echoes, ~45% of bytes, and mostly restate the conversation)
 - `--case-sensitive` exact case match, useful for all-caps searches
 - `--json` machine-readable output (compact, same truncation and budget as text)
-- `--self-test` verify the tool against a built-in synthetic corpus (20 assertions, no dependencies) — run this after copying the skill anywhere
+- `--self-test` verify the tool against a built-in synthetic corpus (no dependencies) — run this after copying the skill anywhere
 
 ## Output rules
 

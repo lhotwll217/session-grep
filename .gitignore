@@ -2,6 +2,7 @@ node_modules/
 .env
 session_sources.json
 .session-grep/
+!skills/session-grep/session_sources.json
 *.log
 .promptfoo/
 

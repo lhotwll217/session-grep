@@ -36,22 +36,35 @@ session-grep --list-roots                                    # show configured s
 
 Searches `~/.claude/projects` and `~/.codex/sessions` by default; `--root DIR` points
 anywhere. If sessions live elsewhere, add known-format roots with
-local `session_sources.json` config; start from
-[`session_sources.example.json`](session_sources.example.json) and keep the real file
-uncommitted. See [skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
+local `session_sources.json` config and keep that file uncommitted. See
+[skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
 Full flags and agent guidance: [skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
 
 ## Sources
 
 `session_sources.json` is local routing config, like `.env`: keep it uncommitted and
-use it to point supported parsers at machine-specific directories. It maps parser names
-such as `claude` or `codex` to roots; adding a new transcript format still requires an
-adapter in `skills/session-grep/adapters/`. The built-in default map and config loader
-live in `skills/session-grep/sources.mjs`.
+use it to point supported parsers at machine-specific directories. It maps `type`
+values such as `claude` or `codex` to roots; `type` is the adapter key. The shipped
+defaults live in `skills/session-grep/session_sources.json`, and the config loader
+lives in `skills/session-grep/sources.mjs`. Adding a new transcript format still
+requires an adapter in `skills/session-grep/adapters/`.
 
-Start from [`session_sources.example.json`](session_sources.example.json), then copy or
-adapt it as `session_sources.json` in the project root, `./.session-grep/`, or your
-home-level session-grep config directory.
+Local `session_sources.json` files can either replace the shipped list with an array:
+
+```json
+[
+  { "type": "codex", "root": "~/alt/codex/sessions" }
+]
+```
+
+or patch it with `disable` and `add`:
+
+```json
+{
+  "disable": ["codex"],
+  "add": [{ "type": "codex", "root": "~/alt/codex/sessions" }]
+}
+```
 
 Planned adapter targets include opencode, Pi, Gemini CLI, Cursor, and other agent
 harnesses with durable local transcripts.

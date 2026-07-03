@@ -8,8 +8,7 @@
   },
   "files": [
     "bin/",
-    "skills/",
-    "session_sources.example.json"
+    "skills/"
   ],
   "scripts": {
     "eval": "promptfoo eval -c eval/promptfooconfig.yaml --no-cache",

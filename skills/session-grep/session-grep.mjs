@@ -90,14 +90,20 @@ if (opts.any) {
   if (!anyWords.length) usage(1, '--any needs at least one query word');
 }
 
-// Session roots are local, per-environment routing config. Built-in defaults and
-// session_sources.json loading live in sources.mjs; parsing lives in adapters/.
+// Session roots are local, per-environment routing config. Shipped defaults live
+// in session_sources.json; local override loading lives in sources.mjs; parsing
+// lives in adapters/.
 const sourceNames = Object.keys(ADAPTERS);
-const sourceMap = loadSessionSources({ knownSources: sourceNames, rootOverrides: opts.roots });
+const sourceMap = loadSessionSources({
+  knownSources: sourceNames,
+  rootOverrides: opts.roots,
+  defaultConfigPath: path.join(scriptDir, 'session_sources.json'),
+});
 const roots = sourceMap.roots.map((entry) => entry.root).filter((dir) => fs.existsSync(dir));
 if (opts.listRoots) {
+  console.log(`default=${sourceMap.defaultPath ?? '(none)'}`);
   console.log(`config=${sourceMap.configPath ?? '(none)'}`);
-  for (const entry of sourceMap.roots) console.log(`${entry.source}\texists=${fs.existsSync(entry.root)}\t${entry.root}`);
+  for (const entry of sourceMap.roots) console.log(`${entry.type}\texists=${fs.existsSync(entry.root)}\t${entry.root}`);
   process.exit(0);
 }
 if (!roots.length) usage(1, 'No session roots found to search — add session_sources.json (see SKILL.md "Onboarding") or pass --root DIR');
@@ -485,6 +491,9 @@ async function selfTest() {
   fs.mkdirSync(path.join(dir, 'relocated'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'relocated', 'rollout-dddd.jsonl'),
     codexLine('assistant', 'relocatedsource reply from a configured codex root', '2026-06-08T08:00:00Z'));
+  fs.mkdirSync(path.join(dir, 'moved'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'moved', 'eeee2222.jsonl'),
+    line('assistant', text('movedclaude reply from a configured claude root'), '2026-06-09T08:00:00Z'));
 
   const runRaw = (args, env = {}) => execFileSync(process.execPath, [self, ...args], {
     encoding: 'utf8',
@@ -549,12 +558,14 @@ async function selfTest() {
     const cxOnly = JSON.parse(run(['--query', 'zorptastic', '--source', 'claude', '--json']));
     check('--source filters by adapter', cxOnly.totalMatches === 0);
     const sourcesFile = path.join(dir, 'session_sources.json');
-    fs.writeFileSync(sourcesFile, JSON.stringify({
-      disable: ['claude', 'codex'],
-      add: [{ source: 'codex', root: path.join(dir, 'relocated') }],
-    }));
+    fs.writeFileSync(sourcesFile, JSON.stringify([
+      { type: 'codex', root: path.join(dir, 'relocated') },
+      { type: 'claude', root: path.join(dir, 'moved') },
+    ]));
     const configured = JSON.parse(runRaw(['--query', 'relocatedsource', '--json'], { SESSION_GREP_SOURCES_FILE: sourcesFile }));
-    check('session_sources config adds roots', configured.totalMatches === 1 && configured.matches[0].source === 'codex');
+    check('session_sources type routes codex parser', configured.totalMatches === 1 && configured.matches[0].source === 'codex');
+    const configuredClaude = JSON.parse(runRaw(['--query', 'movedclaude', '--json'], { SESSION_GREP_SOURCES_FILE: sourcesFile }));
+    check('session_sources type routes claude parser', configuredClaude.totalMatches === 1 && configuredClaude.matches[0].source === 'claude');
     const listed = runRaw(['--list-roots'], { SESSION_GREP_SOURCES_FILE: sourcesFile });
     check('--list-roots shows configured root', listed.includes(`config=${sourcesFile}`) && listed.includes(path.join(dir, 'relocated')));
 
