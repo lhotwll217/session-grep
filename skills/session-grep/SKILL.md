@@ -12,11 +12,9 @@ punctuation/common phrases, or when you need a simple pattern like hashtags.
 
 ## Onboarding (first use)
 
-The folders searched by default come from the shipped
-`skills/session-grep/session_sources.json` plus an optional local
-`session_sources.json` override. Treat local `session_sources.json` like `.env`:
-it is per-person/per-environment configuration, not a committed project file.
-On first use, run:
+The folders searched by default are the `DEFAULT_SOURCES` constant near the top of
+`session-grep.mjs` — the standard per-user homes for each supported tool. Roots that
+don't exist are skipped, so zero config works out of the box. On first use, run:
 
 ```bash
 node session-grep.mjs --list-roots
@@ -33,21 +31,22 @@ homes:
 | Gemini CLI | `~/.gemini/tmp` | json (not yet parseable) |
 | opencode | `~/.local/share/opencode/storage` | split json (not yet parseable) |
 
-Hosts and launchers are not transcript formats. Configure transcript roots by
-adapter `type` (`claude`, `codex`) and directory.
+Hosts and launchers are not transcript formats. Roots are keyed by adapter `type`
+(`claude`, `codex`) and directory.
 
 Quick existence check: `ls -d ~/.claude/projects ~/.codex/sessions 2>/dev/null`.
-Any directory of supported session `*.jsonl` files can be added via a local
-`session_sources.json`; `--root DIR` overrides per call without editing anything.
-Config lookup order:
+There are three ways to search somewhere other than the defaults, in order of
+precedence:
 
-1. `$SESSION_GREP_SOURCES_FILE`
-2. `./session_sources.json`
-3. `./.session-grep/session_sources.json`
-4. `$SESSION_GREP_HOME/session_sources.json`
-5. `~/.session-grep/session_sources.json`
+1. `--root DIR` — per call, no config; format auto-detected. Repeatable.
+2. `$SESSION_GREP_SOURCES_FILE` — path to a JSON array of `{ type, root }` that
+   *replaces* the defaults for that run. The single override hook for a global/npx
+   install you don't edit, and for CI.
+3. Edit `DEFAULT_SOURCES` in `session-grep.mjs` — the skill is vendored into your
+   repo via `npx skills add`, so this file is yours. Adding a bespoke tool means
+   dropping an adapter in `adapters/` and adding a line here; commit both.
 
-Local configs can replace the shipped list with an array:
+The override file is a plain array:
 
 ```json
 [
@@ -55,26 +54,16 @@ Local configs can replace the shipped list with an array:
 ]
 ```
 
-or patch the shipped list with `disable` and `add`:
+`type` must be an adapter that session-grep supports (`claude` or `codex` today) —
+it selects the parser, so a relocated Codex store does not need `codex` in its path.
+An override is authoritative: it does not teach a new format, only routes a known
+parser at a directory. If `$SESSION_GREP_SOURCES_FILE` points at a missing,
+unparseable, or non-array file, session-grep warns on stderr and falls back to the
+built-in defaults rather than failing silently — `--list-roots` reports
+`config_error=true` in that case.
 
-```json
-{
-  "disable": ["codex"],
-  "add": [
-    { "type": "codex", "root": "~/alt/codex/sessions" }
-  ]
-}
-```
-
-`type` must be an adapter that session-grep supports (`claude` or `codex` today).
-The config maps known parsers to local directories; it does not teach a new file
-format. For configured roots, `type` is authoritative for parsing, so a moved Codex
-directory does not need `codex` in its path. If a local config file is present but
-not valid JSON, session-grep warns on stderr and falls back to the shipped defaults
-rather than failing silently — `--list-roots` reports `config_error=true` in that case.
-
-The shipped default routes live in `session_sources.json`, the local config loader
-lives in `sources.mjs`, and parser implementations live in `adapters/`.
+The default routes live in `DEFAULT_SOURCES`, the source resolver lives in
+`sources.mjs`, and parser implementations live in `adapters/`.
 
 Format support lives in the `adapters/` folder next to the script — one file per
 tool, each exporting `{name, detect(file), message(record, opts)}`. Supporting a

@@ -90,29 +90,38 @@ if (opts.any) {
   if (!anyWords.length) usage(1, '--any needs at least one query word');
 }
 
-// Session roots are local, per-environment routing config. Shipped defaults live
-// in session_sources.json; local override loading lives in sources.mjs; parsing
-// lives in adapters/.
+// Built-in default roots, searched when SESSION_GREP_SOURCES_FILE is unset. These are
+// the standard per-user homes for each tool; roots that don't exist are skipped, so
+// zero config works out of the box. To search a relocated store or a new tool: add an
+// adapter in adapters/ and a line here (this file is yours to edit — the skill is
+// vendored via `npx skills add`), or point SESSION_GREP_SOURCES_FILE at a JSON array of
+// { type, root }, or pass --root DIR for one call. See SKILL.md "Onboarding".
+const DEFAULT_SOURCES = [
+  { type: 'claude', root: '~/.claude/projects' },
+  { type: 'codex', root: '~/.codex/sessions' },
+  { type: 'codex', root: '~/.codex/archived_sessions' },
+];
 const sourceNames = Object.keys(ADAPTERS);
 const sourceMap = loadSessionSources({
   knownSources: sourceNames,
+  defaultSources: DEFAULT_SOURCES,
   rootOverrides: opts.roots,
-  defaultConfigPath: path.join(scriptDir, 'session_sources.json'),
 });
 const roots = sourceMap.roots.map((entry) => entry.root).filter((dir) => fs.existsSync(dir));
-// A present-but-broken config silently reverts to defaults; say so on every run so a
-// typo in local routing config never passes as "no override took effect".
+// A present-but-broken override silently reverts to defaults; say so on every run so a
+// mistake in SESSION_GREP_SOURCES_FILE never passes as "no override took effect".
 if (sourceMap.configError) {
-  console.error(`session-grep: warning: ${sourceMap.configPath} is not valid JSON — ignoring it and using default source roots (see --list-roots)`);
+  const why = { missing: 'does not exist', unparseable: 'is not valid JSON', 'not-an-array': 'must be a JSON array of { type, root }' }[sourceMap.configError] ?? 'could not be used';
+  console.error(`session-grep: warning: SESSION_GREP_SOURCES_FILE ${sourceMap.configPath} ${why} — using built-in defaults (see --list-roots)`);
 }
 if (opts.listRoots) {
-  console.log(`default=${sourceMap.defaultPath ?? '(none)'}`);
+  console.log(`origin=${sourceMap.origin}`);
   console.log(`config=${sourceMap.configPath ?? '(none)'}`);
-  if (sourceMap.configError) console.log('config_error=true (file present but not valid JSON; using defaults)');
+  if (sourceMap.configError) console.log(`config_error=true (${sourceMap.configError}; using built-in defaults)`);
   for (const entry of sourceMap.roots) console.log(`${entry.type}\texists=${fs.existsSync(entry.root)}\t${entry.root}`);
   process.exit(0);
 }
-if (!roots.length) usage(1, 'No session roots found to search — add session_sources.json (see SKILL.md "Onboarding") or pass --root DIR');
+if (!roots.length) usage(1, 'No session roots found to search — edit DEFAULT_SOURCES / set SESSION_GREP_SOURCES_FILE (see SKILL.md "Onboarding") or pass --root DIR');
 
 // Browse modes answer "which session?" and "what happened in it?" in one call each —
 // whole-thread questions shouldn't cost 20 grep probes. A skim substitutes for many
@@ -493,7 +502,7 @@ async function selfTest() {
   fs.writeFileSync(path.join(dir, 'codex', 'rollout-cccc.jsonl'),
     codexLine('assistant', 'zorptastic reply straight from the codex adapter', '2026-06-07T08:00:00Z'));
   // Same Codex format under a root whose path does not reveal the format. This
-  // exercises session_sources.json as the source of truth for parser selection.
+  // exercises the SESSION_GREP_SOURCES_FILE override as the source of truth for parsing.
   fs.mkdirSync(path.join(dir, 'relocated'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'relocated', 'rollout-dddd.jsonl'),
     codexLine('assistant', 'relocatedsource reply from a configured codex root', '2026-06-08T08:00:00Z'));
