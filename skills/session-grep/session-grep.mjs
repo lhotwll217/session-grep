@@ -100,9 +100,15 @@ const sourceMap = loadSessionSources({
   defaultConfigPath: path.join(scriptDir, 'session_sources.json'),
 });
 const roots = sourceMap.roots.map((entry) => entry.root).filter((dir) => fs.existsSync(dir));
+// A present-but-broken config silently reverts to defaults; say so on every run so a
+// typo in local routing config never passes as "no override took effect".
+if (sourceMap.configError) {
+  console.error(`session-grep: warning: ${sourceMap.configPath} is not valid JSON — ignoring it and using default source roots (see --list-roots)`);
+}
 if (opts.listRoots) {
   console.log(`default=${sourceMap.defaultPath ?? '(none)'}`);
   console.log(`config=${sourceMap.configPath ?? '(none)'}`);
+  if (sourceMap.configError) console.log('config_error=true (file present but not valid JSON; using defaults)');
   for (const entry of sourceMap.roots) console.log(`${entry.type}\texists=${fs.existsSync(entry.root)}\t${entry.root}`);
   process.exit(0);
 }
@@ -568,6 +574,12 @@ async function selfTest() {
     check('session_sources type routes claude parser', configuredClaude.totalMatches === 1 && configuredClaude.matches[0].source === 'claude');
     const listed = runRaw(['--list-roots'], { SESSION_GREP_SOURCES_FILE: sourcesFile });
     check('--list-roots shows configured root', listed.includes(`config=${sourcesFile}`) && listed.includes(path.join(dir, 'relocated')));
+    // A malformed local config must be flagged, not silently swapped for the defaults.
+    const badFile = path.join(dir, 'bad_sources.json');
+    fs.writeFileSync(badFile, '{ "disable": ["codex"], not-valid ]');
+    const bad = spawnSync(process.execPath, [self, '--list-roots'], { encoding: 'utf8', env: { ...process.env, SESSION_GREP_SOURCES_FILE: badFile } });
+    check('malformed config warns on stderr', bad.stderr.includes('is not valid JSON'));
+    check('malformed config flagged in --list-roots', bad.stdout.includes('config_error=true'));
 
     // pointer drill-in: consume a hit's id+idx via --session/--at
     const hit = JSON.parse(run(['--query', 'flumoxide', '--json'])).matches[0];

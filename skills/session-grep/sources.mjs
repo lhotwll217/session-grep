@@ -72,6 +72,10 @@ export function loadSessionSources({
   const known = new Set(knownSources ?? []);
   const defaults = normalizeEntries(rootEntries(readJson(defaultConfigPath).config), known, home);
   const { path: configPath, config } = readLocalConfig({ env, cwd, home });
+  // A config file that is present but unparseable (or literal null/empty) must not
+  // silently masquerade as "no override" — that hands the user the shipped defaults
+  // while they believe their edits took effect. Surface it so callers can warn.
+  const configError = Boolean(configPath) && config == null;
   let roots = defaults;
 
   if (Array.isArray(config) || Array.isArray(config?.roots)) {
@@ -82,7 +86,7 @@ export function loadSessionSources({
     roots.push(...normalizeEntries(Array.isArray(config.add) ? config.add : [], known, home));
   }
 
-  return { defaultPath: defaultConfigPath ?? null, configPath, roots: dedupe(roots) };
+  return { defaultPath: defaultConfigPath ?? null, configPath, configError, roots: dedupe(roots) };
 }
 
 export function configuredSourceOf(file, sourceMap, knownSources) {

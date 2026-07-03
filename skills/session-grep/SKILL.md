@@ -69,7 +69,9 @@ or patch the shipped list with `disable` and `add`:
 `type` must be an adapter that session-grep supports (`claude` or `codex` today).
 The config maps known parsers to local directories; it does not teach a new file
 format. For configured roots, `type` is authoritative for parsing, so a moved Codex
-directory does not need `codex` in its path.
+directory does not need `codex` in its path. If a local config file is present but
+not valid JSON, session-grep warns on stderr and falls back to the shipped defaults
+rather than failing silently — `--list-roots` reports `config_error=true` in that case.
 
 The shipped default routes live in `session_sources.json`, the local config loader
 lives in `sources.mjs`, and parser implementations live in `adapters/`.
