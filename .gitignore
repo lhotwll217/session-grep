@@ -1,0 +1,17 @@
+node_modules/
+.env
+*.log
+.promptfoo/
+
+# ── private eval artifacts — the harness ships, the specimens don't ──────────
+# Your transcripts, the cases mined from them (rubrics contain transcript facts),
+# qualitative findings (quote transcripts), and all run outputs stay local.
+# See eval/README.md for how to create your own. eval/history.jsonl (numbers only)
+# IS committed as the record of results.
+eval/fixtures/
+eval/cases.yaml
+eval/cases-codex.yaml
+eval/findings.jsonl
+eval/results/
+eval/.sandbox/
+.DS_Store
