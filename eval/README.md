@@ -64,6 +64,7 @@ Needs: Node ≥ 20, ripgrep, promptfoo, a logged-in Claude Code CLI (no API key)
 | path | what | committed? |
 |---|---|---|
 | `promptfooconfig.yaml` | the benchmark: 2 arms x pinned models | yes |
+| `promptfooconfig-smoke.yaml` | release smoke: session-grep arm only | yes |
 | `cases.example.yaml` | case template + design notes | yes |
 | `cases.yaml` | YOUR cases (rubrics contain transcript facts) | no |
 | `fixtures/` | YOUR transcript corpus | no |
