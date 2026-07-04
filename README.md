@@ -1,6 +1,6 @@
 # session-grep
 
-Grep across local AI coding-session transcripts (Claude Code, Codex) with **bounded
+Grep across local AI coding-session transcripts (Claude Code, Codex, Pi) with **bounded
 message context** — built for agents answering questions about past sessions.
 
 Session history is a knowledge base — decisions, incidents, rules, dead ends — but
@@ -34,9 +34,11 @@ session-grep --skim 269a                                     # one session's con
 session-grep --list-roots                                    # show configured source roots
 ```
 
-Searches `~/.claude/projects` and `~/.codex/sessions` by default; `--root DIR` points
-anywhere. If sessions live elsewhere, see Sources below. Full flags and agent
-guidance: [skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
+Searches `~/.claude/projects`, `~/.codex/sessions`, and `~/.pi/agent/sessions` by
+default; `--root DIR` points anywhere, and `--exclude-re REGEX` (repeatable) removes
+any file whose path matches — the hook for enforcing a path blacklist from a wrapper.
+If sessions live elsewhere, see Sources below. Full flags and agent guidance:
+[skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
 
 ## Sources
 
@@ -65,7 +67,7 @@ search elsewhere, in precedence order:
 `type` selects the parser, so a relocated store doesn't need the tool's name in its
 path. A missing, unparseable, or non-array override warns on stderr and falls back to
 the defaults (`--list-roots` shows `config_error=true`). Planned adapter targets
-include opencode, Pi, Gemini CLI, Cursor, and other agent harnesses with durable
+include opencode, Gemini CLI, Cursor, and other agent harnesses with durable
 local transcripts.
 
 ## Benchmark
