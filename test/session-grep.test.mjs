@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const GREP = join(here, '..', 'bin', 'session-grep.mjs');
+const GREP = join(here, '..', 'skills', 'session-grep', 'session-grep.mjs');
 const hasRg = spawnSync('rg', ['--version'], { stdio: 'ignore' }).status === 0;
 
 const claudeLine = (role, text, ts) =>

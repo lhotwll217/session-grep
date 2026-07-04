@@ -1,6 +1,6 @@
 // Promptfoo provider: runs Claude Code headless (`claude -p`) as the eval subject.
 // Two arms share this file, selected by config.arm:
-//   'session-grep' — instructed + permitted to use bin/session-grep.mjs
+//   'session-grep' — instructed + permitted to use skills/session-grep/session-grep.mjs
 //   'naive-grep'   — instructed to use plain rg/grep/Read over the raw JSONL
 // Both arms get an identical read-only tool surface otherwise, so the measured
 // difference is the search strategy, not the harness.
@@ -43,7 +43,7 @@ if (!fs.existsSync(TRANSCRIPTS) || fixturesMtime > syncedAt) {
   fs.writeFileSync(STAMP, String(Date.now()));
 }
 
-const GREP_BIN = path.join(repoRoot, 'bin', 'session-grep.mjs');
+const GREP_BIN = path.join(repoRoot, 'skills', 'session-grep', 'session-grep.mjs');
 
 const COMMON_RULES = `The transcripts are your ONLY source of truth. Do not answer from your own memory, general knowledge, or any other files — always search the transcripts first. In the questions, "we"/"I" refer to the user and agent INSIDE those transcripts (a project called owner-operator), not to you or this environment.
 
@@ -87,7 +87,7 @@ const ARMS = {
     systemPrompt: SKILL_ARM_PROMPT,
     // Cover the invocation forms agents actually produce (absolute and relative);
     // a missed prefix reads as a permission denial and haiku gives up.
-    allowedTools: `${BASE_TOOLS},Bash(node ${GREP_BIN}*),Bash(node bin/session-grep.mjs*),Bash(node ../bin/session-grep.mjs*),Bash(node ../../bin/session-grep.mjs*)`,
+    allowedTools: `${BASE_TOOLS},Bash(node ${GREP_BIN}*),Bash(node skills/session-grep/session-grep.mjs*),Bash(node ../skills/session-grep/session-grep.mjs*),Bash(node ../../skills/session-grep/session-grep.mjs*)`,
   },
   'naive-grep': {
     systemPrompt: NAIVE_ARM_PROMPT,

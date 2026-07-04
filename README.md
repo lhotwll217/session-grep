@@ -13,25 +13,27 @@ returns ranked hits with a hard output budget.
 ## Install
 
 ```bash
-npx skills add lhotwll217/session-grep                    # as an agent skill
-npx session-grep --query "why did you" --since 7d         # as a CLI, no install
-npm i -g session-grep                                     # or global
-npx session-grep --self-test                              # verify: built-in assertions
+npx skills add lhotwll217/session-grep                        # vendor the skill into your repo
+node skills/session-grep/session-grep.mjs --self-test         # verify: built-in assertions
 ```
 
 Needs Node ≥ 20 and ripgrep. The skill is the [skills/session-grep/](skills/session-grep/)
 folder (SKILL.md + script + adapters) — installable via `npx skills add`, or copy it into
-any skills directory; the self-test travels with it. Session formats are pluggable: one
-adapter file per tool in `adapters/`, drop in a new one to support another harness.
+any skills directory; the self-test travels with it, and there is nothing else to install
+(no npm package, no registry). Session formats are pluggable: one adapter file per tool
+in `adapters/`, drop in a new one to support another harness.
 
 ## Use
 
+Invoke the script wherever the skill is vendored (shown here as `sg`):
+
 ```bash
-session-grep --query "task_started" --before 2 --after 2      # exact term, bounded context
-session-grep --query "sidebar poll triage membership" --any   # multi-word: rarity-ranked, per-word hit counts
-session-grep --overview                                       # one-line digest per session
-session-grep --skim 269a                                     # one session's conversation, sampled to budget
-session-grep --list-roots                                    # show configured source roots
+alias sg='node skills/session-grep/session-grep.mjs'
+sg --query "task_started" --before 2 --after 2      # exact term, bounded context
+sg --query "sidebar poll triage membership" --any   # multi-word: rarity-ranked, per-word hit counts
+sg --overview                                       # one-line digest per session
+sg --skim 269a                                      # one session's conversation, sampled to budget
+sg --list-roots                                     # show configured source roots
 ```
 
 Searches `~/.claude/projects`, `~/.codex/sessions`, and `~/.pi/agent/sessions` by
