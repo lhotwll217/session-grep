@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const GREP = join(here, '..', 'bin', 'session-grep.mjs');
+const GREP = join(here, '..', 'skills', 'session-grep', 'session-grep.mjs');
 const hasRg = spawnSync('rg', ['--version'], { stdio: 'ignore' }).status === 0;
 
 const claudeLine = (role, text, ts) =>
@@ -39,6 +39,32 @@ test('literal match with bounded context via --root', { skip: !hasRg && 'ripgrep
     assert.equal(m.before.length, 1);
     assert.equal(m.after.length, 1);
     assert.equal(m.id, 'aaaa');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('pi adapter and --exclude-re path blacklist', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    mkdirSync(join(root, 'pi'), { recursive: true });
+    const piLine = (role, content, ts) =>
+      JSON.stringify({ type: 'message', id: 'ab12cd34', parentId: null, timestamp: ts, message: { role, content } }) + '\n';
+    writeFileSync(
+      join(root, 'pi', '2026-06-10T08-00-00_cccc.jsonl'),
+      JSON.stringify({ type: 'session', version: 3, id: 'cccc', timestamp: '2026-06-10T08:00:00Z', cwd: '/tmp' }) + '\n' +
+        piLine('user', 'PINEEDLE from the pi harness', '2026-06-10T08:00:01Z') +
+        piLine('assistant', [{ type: 'text', text: 'PINEEDLE answered' }], '2026-06-10T08:00:02Z'),
+    );
+    const out = JSON.parse(
+      execFileSync(process.execPath, [GREP, '--query', 'pineedle', '--root', root, '--json'], { encoding: 'utf8' }),
+    );
+    assert.equal(out.shown, 2);
+    assert.ok(out.matches.every((m) => m.source === 'pi'));
+    const excluded = JSON.parse(
+      execFileSync(process.execPath, [GREP, '--query', 'pineedle', '--root', root, '--exclude-re', 'cccc', '--json'], { encoding: 'utf8' }),
+    );
+    assert.equal(excluded.totalMatches, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

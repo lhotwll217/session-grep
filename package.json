@@ -1,15 +1,9 @@
 {
   "name": "session-grep",
   "version": "0.1.1",
-  "description": "Grep AI coding-session transcripts (Claude Code, Codex) with bounded message context — built for agents. Includes rarity-ranked multi-word search, session overviews, sampled spines, and a built-in self-test.",
+  "private": true,
+  "description": "Grep AI coding-session transcripts (Claude Code, Codex, Pi) with bounded message context — built for agents. Includes rarity-ranked multi-word search, session overviews, sampled spines, and a built-in self-test.",
   "type": "module",
-  "bin": {
-    "session-grep": "bin/session-grep.mjs"
-  },
-  "files": [
-    "bin/",
-    "skills/"
-  ],
   "scripts": {
     "eval": "promptfoo eval -c eval/promptfooconfig.yaml --no-cache",
     "eval:smoke": "promptfoo eval -c eval/promptfooconfig-smoke.yaml --no-cache --filter-pattern 'roadmap-rule|interactive-launch|ripgrep-shim'",
@@ -17,23 +11,8 @@
     "loop": "node eval/loop.mjs",
     "compare": "node eval/compare.mjs",
     "test": "node --test test/*.test.mjs",
-    "self-test": "node skills/session-grep/session-grep.mjs --self-test",
-    "prepublishOnly": "npm test && npm run self-test"
+    "self-test": "node skills/session-grep/session-grep.mjs --self-test"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/lhotwll217/session-grep.git"
-  },
-  "keywords": [
-    "claude-code",
-    "codex",
-    "sessions",
-    "transcripts",
-    "grep",
-    "agent-tools",
-    "skill",
-    "promptfoo"
-  ],
   "license": "MIT",
   "engines": {
     "node": ">=20"

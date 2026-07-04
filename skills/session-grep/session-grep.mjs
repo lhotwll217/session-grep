@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // session-grep — literal/regex grep across AI coding-session transcripts (Claude Code,
-// Codex) returning bounded MESSAGE context around each hit, not raw JSONL lines.
+// Codex, Pi) returning bounded MESSAGE context around each hit, not raw JSONL lines.
 // Ported from owner-operator's sessions-grep skill; standalone here so it can be shared
 // and continuously eval-tuned (see eval/).
 import fs from 'node:fs';
@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { configuredSourceOf, loadSessionSources } from './sources.mjs';
 
 const args = process.argv.slice(2);
-const opts = { limit: 20, before: 1, after: 1, role: 'all', source: 'all', sort: 'newest', json: false, regex: false, roots: [], maxChars: 8000 };
+const opts = { limit: 20, before: 1, after: 1, role: 'all', source: 'all', sort: 'newest', json: false, regex: false, roots: [], excludeRe: [], maxChars: 8000 };
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === '--query') opts.query = args[++i];
@@ -22,6 +22,7 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--since') opts.since = args[++i];
   else if (a === '--sort') opts.sort = args[++i];
   else if (a === '--root') opts.roots.push(args[++i]);
+  else if (a === '--exclude-re') opts.excludeRe.push(args[++i]);
   else if (a === '--max-chars') { opts.maxChars = Number(args[++i]); opts.maxCharsSet = true; }
   else if (a === '--overview') opts.overview = true;
   else if (a === '--skim') opts.skim = args[++i];
@@ -77,6 +78,20 @@ if (opts.since && sinceTime == null) usage(1, '--since must be today, Nd, or YYY
 if (opts.any && opts.regex) usage(1, '--any and --regex cannot be combined');
 const queryRegex = opts.regex ? compileRegex(opts.query, opts.caseSensitive) : null;
 
+// --exclude-re: path-based exclusion, applied wherever session files are enumerated
+// (search, browse, window mode) so an excluded transcript can never surface. This is
+// the hook wrappers use to enforce a blacklist (e.g. owner-operator's privacy layer);
+// patterns are JS regexes tested against the full file path.
+const excludeRes = opts.excludeRe.map((p) => {
+  if (typeof p !== 'string' || !p.length) usage(1, '--exclude-re requires a regex argument');
+  try {
+    return new RegExp(p);
+  } catch (error) {
+    usage(1, `--exclude-re: invalid JavaScript regex ${JSON.stringify(p)}: ${error.message}`);
+  }
+});
+const isExcluded = (file) => excludeRes.some((re) => re.test(file));
+
 // --any: multi-word phrases rarely occur verbatim in transcripts, so match ANY word
 // and rank by how many distinct words a message hits. Low-signal words are dropped
 // from the word set so common glue doesn't dominate the ranking.
@@ -100,6 +115,7 @@ const DEFAULT_SOURCES = [
   { type: 'claude', root: '~/.claude/projects' },
   { type: 'codex', root: '~/.codex/sessions' },
   { type: 'codex', root: '~/.codex/archived_sessions' },
+  { type: 'pi', root: '~/.pi/agent/sessions' },
 ];
 const sourceNames = Object.keys(ADAPTERS);
 const sourceMap = loadSessionSources({
@@ -183,6 +199,7 @@ if (rg.status === 2 && opts.regex) {
 } else {
   files = rg.status === 0 ? rg.stdout.trim().split('\n').filter(Boolean) : [];
 }
+files = files.filter((f) => !isExcluded(f));
 const matches = [];
 const q = opts.caseSensitive ? opts.query : opts.query.toLowerCase();
 // --any rarity stats: document frequency per word across scanned messages. Rare words
@@ -344,7 +361,7 @@ function allSessionFiles() {
   for (const root of roots) {
     for (const entry of fs.readdirSync(root, { recursive: true })) {
       const p = path.join(root, String(entry));
-      if (p.endsWith('.jsonl') && fs.statSync(p).isFile()) out.push(p);
+      if (p.endsWith('.jsonl') && !isExcluded(p) && fs.statSync(p).isFile()) out.push(p);
     }
   }
   return out;
@@ -467,7 +484,7 @@ function compileRegex(pattern, caseSensitive) {
 
 function usage(code, msg) {
   if (msg) console.error(msg);
-  console.error('Usage: session-grep.mjs --query TEXT [--any] [--regex] [--limit N] [--before N] [--after N] [--role user|assistant|all] [--source claude|codex|all] [--since today|Nd|YYYY-MM-DD] [--sort newest|oldest|file] [--root DIR ...] [--max-chars N] [--include-tools] [--case-sensitive] [--json] | --overview | --skim ID | --session ID --at INDEX | --list-roots | --self-test');
+  console.error('Usage: session-grep.mjs --query TEXT [--any] [--regex] [--limit N] [--before N] [--after N] [--role user|assistant|all] [--source claude|codex|pi|all] [--since today|Nd|YYYY-MM-DD] [--sort newest|oldest|file] [--root DIR ...] [--exclude-re REGEX ...] [--max-chars N] [--include-tools] [--case-sensitive] [--json] | --overview | --skim ID | --session ID --at INDEX | --list-roots | --self-test');
   process.exit(code);
 }
 
@@ -509,6 +526,20 @@ async function selfTest() {
   fs.mkdirSync(path.join(dir, 'moved'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'moved', 'eeee2222.jsonl'),
     line('assistant', text('movedclaude reply from a configured claude root'), '2026-06-09T08:00:00Z'));
+  // Session E: pi format (session header + tree-structured message entries; tool output
+  // is its own role:"toolResult" message). Path contains /pi/ to exercise detection.
+  fs.mkdirSync(path.join(dir, 'pi'), { recursive: true });
+  const piLine = (role, content, ts) => JSON.stringify({ type: 'message', id: 'ab12cd34', parentId: null, timestamp: ts, message: { role, content } }) + '\n';
+  fs.writeFileSync(path.join(dir, 'pi', '2026-06-10T08-00-00_ffff3333.jsonl'),
+    JSON.stringify({ type: 'session', version: 3, id: 'ffff3333', timestamp: '2026-06-10T08:00:00Z', cwd: '/tmp/proj' }) + '\n' +
+    piLine('user', 'plumbuscal question asked in the pi harness', '2026-06-10T08:00:01Z') +
+    piLine('assistant', [{ type: 'text', text: 'plumbuscal answered straight from the pi adapter' }], '2026-06-10T08:00:02Z') +
+    JSON.stringify({ type: 'message', id: 'ef56ab78', parentId: 'ab12cd34', timestamp: '2026-06-10T08:00:03Z', message: { role: 'toolResult', toolCallId: 'call_1', toolName: 'bash', content: [{ type: 'text', text: 'PINOISE tool output from pi' }], isError: false } }) + '\n' +
+    piLine('custom', [{ type: 'text', text: 'PICUSTOM non-conversation entry' }], '2026-06-10T08:00:04Z'));
+  // Same pi format under a root whose path does not reveal the format (config routing).
+  fs.mkdirSync(path.join(dir, 'relocated-pi'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'relocated-pi', '2026-06-11T08-00-00_gggg4444.jsonl'),
+    piLine('assistant', [{ type: 'text', text: 'relocatedpi reply from a configured pi root' }], '2026-06-11T08:00:00Z'));
 
   const runRaw = (args, env = {}) => execFileSync(process.execPath, [self, ...args], {
     encoding: 'utf8',
@@ -572,15 +603,43 @@ async function selfTest() {
     check('codex adapter parses', cx.totalMatches === 1 && cx.matches[0].source === 'codex');
     const cxOnly = JSON.parse(run(['--query', 'zorptastic', '--source', 'claude', '--json']));
     check('--source filters by adapter', cxOnly.totalMatches === 0);
+
+    // pi adapter: format parsed, source detected from path, toolResult gated by --include-tools
+    const pi = JSON.parse(run(['--query', 'plumbuscal', '--json']));
+    check('pi adapter parses user+assistant', pi.totalMatches === 2 && pi.matches.every((m) => m.source === 'pi'));
+    const piOnly = JSON.parse(run(['--query', 'zorptastic', '--source', 'pi', '--json']));
+    check('--source pi filters by adapter', piOnly.totalMatches === 0);
+    const piNoise = JSON.parse(run(['--query', 'PINOISE', '--json']));
+    check('pi toolResult excluded by default', piNoise.totalMatches === 0);
+    const piTools = JSON.parse(run(['--query', 'PINOISE', '--json', '--include-tools']));
+    check('pi toolResult matches with --include-tools', piTools.totalMatches === 1 && piTools.matches[0].match.role === 'user');
+    const piCustom = JSON.parse(run(['--query', 'PICUSTOM', '--json', '--include-tools']));
+    check('pi non-conversation roles skipped', piCustom.totalMatches === 0);
+
+    // --exclude-re: path-based exclusion holds across search, browse, and window modes
+    const excluded = JSON.parse(run(['--query', 'sidebar', '--json', '--exclude-re', 'aaaa1111']));
+    check('--exclude-re removes matching paths', excluded.totalMatches === 0);
+    const kept = JSON.parse(run(['--query', 'quixotic', '--json', '--exclude-re', 'aaaa1111']));
+    check('--exclude-re keeps non-matching paths', kept.totalMatches === 2);
+    const ovExcluded = run(['--overview', '--exclude-re', 'aaaa1111', '--exclude-re', 'bbbb2222']);
+    check('--exclude-re repeatable + honored by --overview', !ovExcluded.includes('aaaa1111') && !ovExcluded.includes('bbbb2222') && ovExcluded.includes('rollout-cccc'));
+    const winExcluded = spawnSync(process.execPath, [self, '--session', 'aaaa1111', '--at', '0', '--root', dir, '--exclude-re', 'aaaa1111'], { encoding: 'utf8' });
+    check('--exclude-re honored by --session/--at', winExcluded.status === 1 && !winExcluded.stdout.includes('flumoxide'));
+    const badRe = spawnSync(process.execPath, [self, '--query', 'x', '--root', dir, '--exclude-re', '('], { encoding: 'utf8' });
+    check('invalid --exclude-re rejected', badRe.status === 1 && badRe.stderr.includes('--exclude-re'));
+
     const sourcesFile = path.join(dir, 'session_sources.json');
     fs.writeFileSync(sourcesFile, JSON.stringify([
       { type: 'codex', root: path.join(dir, 'relocated') },
       { type: 'claude', root: path.join(dir, 'moved') },
+      { type: 'pi', root: path.join(dir, 'relocated-pi') },
     ]));
     const configured = JSON.parse(runRaw(['--query', 'relocatedsource', '--json'], { SESSION_GREP_SOURCES_FILE: sourcesFile }));
     check('session_sources type routes codex parser', configured.totalMatches === 1 && configured.matches[0].source === 'codex');
     const configuredClaude = JSON.parse(runRaw(['--query', 'movedclaude', '--json'], { SESSION_GREP_SOURCES_FILE: sourcesFile }));
     check('session_sources type routes claude parser', configuredClaude.totalMatches === 1 && configuredClaude.matches[0].source === 'claude');
+    const configuredPi = JSON.parse(runRaw(['--query', 'relocatedpi', '--json'], { SESSION_GREP_SOURCES_FILE: sourcesFile }));
+    check('session_sources type routes pi parser', configuredPi.totalMatches === 1 && configuredPi.matches[0].source === 'pi');
     const listed = runRaw(['--list-roots'], { SESSION_GREP_SOURCES_FILE: sourcesFile });
     check('--list-roots shows configured root', listed.includes(`config=${sourcesFile}`) && listed.includes(path.join(dir, 'relocated')));
     // A malformed local config must be flagged, not silently swapped for the defaults.

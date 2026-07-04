@@ -19,7 +19,7 @@ it holds — the stop condition for an autonomous loop).
 2. INSPECT  eval/results/logs/<runId>/         # HOW each arm searched, per case
 3. DIAGNOSE which cases fail or cost too much, and why (see "reading a trajectory");
             append one line per insight to eval/findings.jsonl
-4. CHANGE   one thing: bin/session-grep.mjs (tool behavior), the arm system prompt in
+4. CHANGE   one thing: skills/session-grep/session-grep.mjs (tool behavior), the arm system prompt in
             eval/providers/claude-agent.mjs (strategy), or SKILL.md (guidance)
 5. RE-RUN   cheapest tier that can see the effect, then climb
 6. KEEP/REVERT based on the paired per-case deltas, not just aggregate means
