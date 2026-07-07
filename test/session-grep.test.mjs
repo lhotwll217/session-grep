@@ -15,6 +15,9 @@ const hasRg = spawnSync('rg', ['--version'], { stdio: 'ignore' }).status === 0;
 const claudeLine = (role, text, ts) =>
   JSON.stringify({ type: role, timestamp: ts, message: { role, content: [{ type: 'text', text }] } }) + '\n';
 
+const codexLine = (role, text, ts) =>
+  JSON.stringify({ type: 'response_item', timestamp: ts, payload: { type: 'message', role, content: [{ type: 'output_text', text }] } }) + '\n';
+
 test('built-in self-test passes', { skip: !hasRg && 'ripgrep not installed' }, () => {
   const out = execFileSync(process.execPath, [GREP, '--self-test'], { encoding: 'utf8' });
   assert.match(out, /self-test: ok/);
@@ -89,6 +92,79 @@ test('role filter and case sensitivity', { skip: !hasRg && 'ripgrep not installe
     );
     assert.equal(caseSensitive.shown, 1);
     assert.equal(caseSensitive.matches[0].match.role, 'assistant');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('typed sources file supports target root and target type narrowing', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    const ooSessions = join(root, 'owner-sessions');
+    const relocatedCodex = join(root, 'relocated-store');
+    mkdirSync(ooSessions, { recursive: true });
+    mkdirSync(relocatedCodex, { recursive: true });
+
+    const piLine = (role, content, ts) =>
+      JSON.stringify({ type: 'message', id: 'ab12cd34', parentId: null, timestamp: ts, message: { role, content } }) + '\n';
+    writeFileSync(
+      join(ooSessions, '2026-06-10T08-00-00_oooo.jsonl'),
+      JSON.stringify({ type: 'session', version: 3, id: 'oooo', timestamp: '2026-06-10T08:00:00Z', cwd: '/tmp' }) + '\n' +
+        piLine('assistant', [{ type: 'text', text: 'OONEEDLE from an owner operator session path' }], '2026-06-10T08:00:02Z'),
+    );
+    writeFileSync(
+      join(relocatedCodex, 'rollout-cccc.jsonl'),
+      codexLine('assistant', 'CODEXNEEDLE from a relocated codex store', '2026-06-11T08:00:00Z'),
+    );
+
+    const sourcesFile = join(root, 'sources.json');
+    writeFileSync(sourcesFile, JSON.stringify([
+      { type: 'pi', root: ooSessions },
+      { type: 'codex', root: relocatedCodex },
+    ]));
+
+    const oo = JSON.parse(
+      execFileSync(process.execPath, [GREP, '--sources-file', sourcesFile, '--target-root', ooSessions, '--query', 'ooneedle', '--json'], { encoding: 'utf8' }),
+    );
+    assert.equal(oo.totalMatches, 1);
+    assert.equal(oo.matches[0].source, 'pi');
+
+    const targetRootMiss = JSON.parse(
+      execFileSync(process.execPath, [GREP, '--sources-file', sourcesFile, '--target-root', ooSessions, '--query', 'codexneedle', '--json'], { encoding: 'utf8' }),
+    );
+    assert.equal(targetRootMiss.totalMatches, 0);
+
+    const codexOnly = JSON.parse(
+      execFileSync(process.execPath, [GREP, '--sources-file', sourcesFile, '--target-type', 'codex', '--query', 'codexneedle', '--json'], { encoding: 'utf8' }),
+    );
+    assert.equal(codexOnly.totalMatches, 1);
+    assert.equal(codexOnly.matches[0].source, 'codex');
+
+    const legacySourceAlias = JSON.parse(
+      execFileSync(process.execPath, [GREP, '--sources-file', sourcesFile, '--source', 'codex', '--query', 'codexneedle', '--json'], { encoding: 'utf8' }),
+    );
+    assert.equal(legacySourceAlias.totalMatches, 1);
+    assert.equal(legacySourceAlias.matches[0].source, 'codex');
+
+    const envOnlySources = join(root, 'env-only-sources.json');
+    writeFileSync(envOnlySources, JSON.stringify([{ type: 'pi', root: ooSessions }]));
+    const flagWins = JSON.parse(
+      execFileSync(process.execPath, [GREP, '--sources-file', sourcesFile, '--query', 'codexneedle', '--json'], {
+        encoding: 'utf8',
+        env: { ...process.env, SESSION_GREP_SOURCES_FILE: envOnlySources },
+      }),
+    );
+    assert.equal(flagWins.totalMatches, 1);
+    assert.equal(flagWins.matches[0].source, 'codex');
+
+    const missingSources = spawnSync(process.execPath, [GREP, '--list-roots', '--sources-file', join(root, 'missing.json')], { encoding: 'utf8' });
+    assert.equal(missingSources.status, 1);
+    assert.match(missingSources.stderr, /--sources-file/);
+    assert.doesNotMatch(missingSources.stdout, /origin=/);
+
+    const rootWithSources = spawnSync(process.execPath, [GREP, '--query', 'ooneedle', '--root', ooSessions, '--sources-file', sourcesFile], { encoding: 'utf8' });
+    assert.equal(rootWithSources.status, 1);
+    assert.match(rootWithSources.stderr, /cannot be combined/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
