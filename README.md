@@ -34,6 +34,7 @@ sg --query "sidebar poll triage membership" --any   # multi-word: rarity-ranked,
 sg --overview                                       # one-line digest per session
 sg --skim 269a                                      # one session's conversation, sampled to budget
 sg --list-roots                                     # show configured source roots
+sg --sources-file ./sources.json --target-root ~/.owner-operator/sessions --query "widget rollout"
 ```
 
 Searches `~/.claude/projects`, `~/.codex/sessions`, and `~/.pi/agent/sessions` by
@@ -48,13 +49,14 @@ The defaults are the `DEFAULT_SOURCES` constant in
 [`skills/session-grep/session-grep.mjs`](skills/session-grep/session-grep.mjs) —
 the standard per-user homes for each supported tool. Transcripts live under `$HOME`
 per user, not per project, so there is no project-local config to discover; roots
-that don't exist are skipped, and zero config works out of the box. Three ways to
+that don't exist are skipped, and zero config works out of the box. Four ways to
 search elsewhere, in precedence order:
 
 1. **`--root DIR`** — per call, format auto-detected. Repeatable.
-2. **`$SESSION_GREP_SOURCES_FILE`** — path to a JSON array of `{ type, root }` that
-   replaces the defaults for that run (the override hook for a global/npx install you
-   don't edit, and for CI):
+2. **`--sources-file FILE`** — per call path to a JSON array of `{ type, root }`; use
+   this when a directory does not reveal its parser type.
+3. **`$SESSION_GREP_SOURCES_FILE`** — env path to the same JSON array, useful for a
+   global/npx install or CI:
 
    ```json
    [
@@ -62,15 +64,23 @@ search elsewhere, in precedence order:
    ]
    ```
 
-3. **Edit `DEFAULT_SOURCES`** — the skill is vendored into your repo via
+4. **Edit `DEFAULT_SOURCES`** — the skill is vendored into your repo via
    `npx skills add`, so the file is yours. Supporting a new tool means adding an
    adapter in `skills/session-grep/adapters/` and a line here; commit both.
 
+`--sources-file` and `$SESSION_GREP_SOURCES_FILE` both *replace* the defaults for that run.
+Do not combine `--root` and `--sources-file`: `--root` is an untyped one-off override;
+use `--target-root` with `--sources-file` to narrow configured typed roots.
+Use `--target-root DIR` to narrow a configured source map to one or more roots while
+preserving the `{ type, root }` parser mapping, and `--target-type claude|codex|pi`
+to narrow by parser/source type. The older `--source TYPE` spelling is accepted as an
+alias for `--target-type TYPE`.
+
 `type` selects the parser, so a relocated store doesn't need the tool's name in its
-path. A missing, unparseable, or non-array override warns on stderr and falls back to
-the defaults (`--list-roots` shows `config_error=true`). Planned adapter targets
-include opencode, Gemini CLI, Cursor, and other agent harnesses with durable
-local transcripts.
+path. A missing, unparseable, or non-array `--sources-file` fails closed; the ambient
+`$SESSION_GREP_SOURCES_FILE` form warns on stderr and falls back to the defaults
+(`--list-roots` shows `config_error=true`). Planned adapter targets include opencode,
+Gemini CLI, Cursor, and other agent harnesses with durable local transcripts.
 
 ## Benchmark
 
@@ -94,10 +104,14 @@ To create your own eval on your own sessions (and tailor the tool with the
 improvement loop), see [eval/README.md](eval/README.md) and
 [eval/AUTORESEARCH.md](eval/AUTORESEARCH.md).
 
-## Origin
+## Origin And Owner Operator
 
-Ported from [owner-operator](https://github.com/lhotwll217/owner-operator)'s
-`sessions-grep` skill; benchmarked on that project's own development sessions.
+Started as [owner-operator](https://github.com/lhotwll217/owner-operator)'s
+`sessions-grep` skill; it now lives here as the upstream primitive. Owner Operator
+vendors `skills/session-grep/` and wraps it with its own session source config and privacy
+blacklist. The typed source seam (`--sources-file`, `--target-root`, `--target-type`, and
+`--exclude-re`) is intentionally part of this upstream CLI so Owner Operator does not need
+a local primitive patch for its own session store.
 
 ## License
 
