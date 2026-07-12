@@ -103,7 +103,8 @@ this SKILL.md — shown below as `session-grep.mjs`:
 
 ```bash
 node session-grep.mjs --query "why did you" --since 7d --limit 12 --before 2 --after 2
-node session-grep.mjs --query "sidebar poll triage membership" --any     # multi-word: any-word match, rarity-ranked
+node session-grep.mjs --query "sidebar poll triage membership" --any --candidates # one best pointer per matching session
+node session-grep.mjs --query "checkpoint" --session 269a                    # search only inside one known session
 node session-grep.mjs --overview                                          # digest of every session
 node session-grep.mjs --skim 269a --max-chars 12000                      # one session's conversation, sampled
 node session-grep.mjs --list-roots                                        # show the source/root map being searched
@@ -117,14 +118,21 @@ For broad questions (summarize a session, what was X about) start with `--overvi
 then `--skim SESSION_ID`, then targeted `--query` for specifics. For fact questions:
 multi-word literal phrases almost never occur verbatim — use `--any` (matches any word,
 hits ranked by word rarity, per-word hit counts reported) or a single rare term.
+For discovery, add `--candidates`: grouping happens before `--limit` and `--max-chars`,
+so repeated hits from one transcript do not crowd out other matching sessions.
 Every hit is a pointer: to read around a promising hit, use `--session <id> --at <idx>`
 from its header instead of re-searching with wider context.
+Use exactly one primary command mode per invocation: `--query`, `--overview`, `--skim`,
+`--session ... --at ...`, or `--list-roots`. A query may add `--session ID` as a scope;
+genuinely ambiguous combinations fail closed rather than silently ignoring part of the request.
 
 Common flags:
 
-- `--query TEXT` literal query, or a JavaScript regex pattern when `--regex` is set
-- `--any` match ANY query word; hits ranked by summed word rarity (IDF); reports per-word hit counts so you learn which words are low-signal
-- `--regex` treat `--query` as a JavaScript regular expression; useful for hashtags and lightweight patterns
+- `--query TEXT` literal query, or a JavaScript regex pattern when `--regex` is set; the query may itself begin with dashes, such as `--units`
+- `--query TEXT --session ID_PREFIX` search only inside one known stable session, returning normal `id`/`idx` evidence pointers
+- `--any` match ANY query word; whitespace and `|` both delimit terms; hits ranked by summed word rarity (IDF); reports per-word hit counts so you learn which words are low-signal
+- `--candidates` group all ranked message hits by stable session ID before limiting/budgeting; returns one best `id`/`best_idx` pointer plus the session's total hit count
+- `--regex` treat `--query` as a JavaScript regular expression; matching is case-insensitive by default, and a common leading `(?i)` is accepted for grep compatibility
 - `--overview` no query needed: one compact digest per session (id, dates, message counts, opening prompt)
 - `--skim ID_PREFIX` no query needed: one session's user/assistant conversation, head/tail kept, middle sampled to the output budget
 - `--session ID_PREFIX --at INDEX` drill into a hit's pointer: every hit prints `id=` and `idx=` — this returns the exact messages around that index (±5 by default, `--before/--after` to widen) without re-running the search
@@ -139,15 +147,24 @@ Common flags:
 - `--root DIR` search this directory of `*.jsonl` transcripts instead of the default live stores (repeatable)
 - `--sources-file FILE` use a JSON array of typed `{ type, root }` sources instead of defaults
 - `--target-root DIR` narrow the configured source map to one or more roots while preserving parser type
+- `--exclude-session ID_PREFIX` exclude a stable session ID (repeatable); unlike `--exclude-re`, this follows canonical IDs rather than filename layout
 - `--exclude-re REGEX` exclude any session file whose path matches this JavaScript regex (repeatable) — applies to every mode (search, `--overview`, `--skim`, `--session/--at`), so wrappers can enforce a path blacklist
 - `--list-roots` print the configured source/root map and whether each root exists
-- `--max-chars N` output budget, default 8000 — excess hits are omitted with a notice, never dumped
+- `--max-chars N` hard rendered-output budget, default 8000 — headers and sampling markers count toward the aperture
 - `--include-tools` also match inside tool_result blocks (excluded by default: they are file/command echoes, ~45% of bytes, and mostly restate the conversation)
 - `--case-sensitive` exact case match, useful for all-caps searches
 - `--json` machine-readable output (compact, same truncation and budget as text)
 - `--self-test` verify the tool against a built-in synthetic corpus (no dependencies) — run this after copying the skill anywhere
 
 ## Output rules
+
+Query previews share the global `--max-chars` aperture across ranked entries. Small result
+sets therefore return complete short match messages when they fit; busy result sets retain
+compact previews and stable `id`/`idx` pointers for drill-in.
+
+For scoped chronology, compare `total_message_matches` with `shown`. If evidence was
+omitted, stay inside the same session and reduce `--before`/`--after`, use `--sort oldest`,
+or raise the aperture before drawing a complete timeline.
 
 Summarize the hits; do not paste long transcript blocks. Give source, id/path, timestamp,
 and the compact context needed to understand what happened around the match.
