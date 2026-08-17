@@ -136,6 +136,16 @@ test('--session without a query or --at is rejected, not silently ignored', { sk
   assert.match(res.stderr, /--session requires --query TEXT or --at INDEX/);
 });
 
+test('session scope consistency: --query --session returns exactly the global subset', { skip }, () => {
+  const all = runJson(['--query', 'koala9', '--limit', '50', '--max-chars', '30000']);
+  const scoped = runJson(['--query', 'koala9', '--session', 'claudeaaaa', '--limit', '50', '--max-chars', '30000']);
+  assert.equal(scoped.session, 'claudeaaaa');
+  assert.deepEqual(
+    scoped.matches.map(key).sort(),
+    all.matches.filter((m) => m.id === 'claudeaaaa').map(key).sort(),
+  );
+});
+
 test('budget monotonicity: raising --max-chars never shrinks the emitted set', { skip }, () => {
   let prevShown = -1;
   let prevKeys = new Set();
