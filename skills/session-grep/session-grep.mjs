@@ -1,16 +1,20 @@
 #!/usr/bin/env node
 // session-grep — literal/regex grep across AI coding-session transcripts (Claude Code,
 // Codex, Pi) returning bounded MESSAGE context around each hit, not raw JSONL lines.
-// Ported from owner-operator's sessions-grep skill; standalone here so it can be shared
-// and continuously eval-tuned (see eval/).
+// Extracted from owner-operator's sessions-grep skill; standalone here so it can be
+// shared, vendored back into wrappers, and continuously eval-tuned (see eval/).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { configuredSourceOf, loadSessionSources } from './sources.mjs';
 
+function expandHome(p) {
+  return p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p;
+}
+
 const args = process.argv.slice(2);
-const opts = { limit: 20, before: 1, after: 1, role: 'all', source: 'all', sort: 'newest', json: false, regex: false, roots: [], excludeRe: [], maxChars: 8000 };
+const opts = { limit: 20, before: 1, after: 1, role: 'all', sort: 'newest', json: false, regex: false, roots: [], targetTypes: [], targetRoots: [], excludeRe: [], excludeSessions: [], maxChars: 8000 };
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
   if (a === '--query') opts.query = args[++i];
@@ -18,11 +22,15 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--before') { opts.before = Number(args[++i]); opts.beforeSet = true; }
   else if (a === '--after') { opts.after = Number(args[++i]); opts.afterSet = true; }
   else if (a === '--role') opts.role = args[++i];
-  else if (a === '--source') opts.source = args[++i];
+  else if (a === '--target-type') opts.targetTypes.push(args[++i]);
+  else if (a === '--source') opts.targetTypes.push(args[++i]);
   else if (a === '--since') opts.since = args[++i];
   else if (a === '--sort') opts.sort = args[++i];
   else if (a === '--root') opts.roots.push(args[++i]);
+  else if (a === '--sources-file') opts.sourcesFile = args[++i];
+  else if (a === '--target-root') opts.targetRoots.push(args[++i]);
   else if (a === '--exclude-re') opts.excludeRe.push(args[++i]);
+  else if (a === '--exclude-session') opts.excludeSessions.push(args[++i]);
   else if (a === '--max-chars') { opts.maxChars = Number(args[++i]); opts.maxCharsSet = true; }
   else if (a === '--max-tokens') { opts.maxChars = Number(args[++i]) * 4; opts.maxCharsSet = true; }
   else if (a === '--overview') opts.overview = true;
@@ -33,6 +41,7 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--self-test') opts.selfTest = true;
   else if (a === '--include-tools') opts.includeTools = true;
   else if (a === '--any') opts.any = true;
+  else if (a === '--candidates') opts.candidates = true;
   else if (a === '--regex') opts.regex = true;
   else if (a === '--case-sensitive') opts.caseSensitive = true;
   else if (a === '--json') opts.json = true;
@@ -44,7 +53,7 @@ for (let i = 0; i < args.length; i++) {
 // Loaded from the adapters/ folder next to this script — one file per session
 // format, each exporting {name, detect(file), message(record, opts), fallback?}.
 // Supporting a new JSONL-based tool = dropping one file in that folder (plus a
-// --self-test fixture below). `--source` values and dispatch derive from what's
+// --self-test fixture below). `--target-type` values and dispatch derive from what's
 // loaded. Non-JSONL formats (Cursor's sqlite, opencode's split JSON) also need a
 // reader change here; see SKILL.md "Onboarding" for the format map.
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -66,19 +75,34 @@ if (opts.selfTest) {
   process.exit(await selfTest());
 }
 if (opts.at != null && !opts.session) usage(1, '--at requires --session ID_PREFIX');
-if (opts.session && opts.at == null) usage(1, '--session requires --at INDEX (from a hit\'s idx= field). To browse one session use --skim ID; to scope a search to one session pass --root on its directory.');
-if (!opts.query && !opts.overview && !opts.skim && !opts.listRoots && !(opts.session && opts.at != null)) usage(1, 'Missing --query (or use --overview / --skim ID / --session ID --at INDEX)');
+if (opts.session && opts.at == null && !opts.query) usage(1, '--session requires --query TEXT or --at INDEX');
+const modes = [
+  ['--query', !!opts.query],
+  ['--overview', !!opts.overview],
+  ['--skim', !!opts.skim],
+  ['--session/--at', !!opts.session && opts.at != null],
+  ['--list-roots', !!opts.listRoots],
+].filter(([, selected]) => selected).map(([name]) => name);
+if (!modes.length) usage(1, 'Missing --query (or use --overview / --skim ID / --session ID --at INDEX)');
+if (modes.length > 1) usage(1, `choose exactly one mode; received ${modes.join(' and ')}`);
+if (opts.roots.length && opts.sourcesFile) usage(1, '--root and --sources-file cannot be combined: --root is an untyped one-off override; use --target-root with --sources-file to narrow configured typed roots');
 if (!Number.isFinite(opts.limit) || opts.limit < 1) usage(1, '--limit must be >= 1');
 if (!Number.isFinite(opts.maxChars) || opts.maxChars < 500) usage(1, '--max-chars must be >= 500 (--max-tokens >= 125)');
 if (!Number.isFinite(opts.before) || opts.before < 0) usage(1, '--before must be >= 0');
 if (!Number.isFinite(opts.after) || opts.after < 0) usage(1, '--after must be >= 0');
 if (!['all', 'user', 'assistant'].includes(opts.role)) usage(1, '--role must be all, user, or assistant');
-if (opts.source !== 'all' && !ADAPTERS[opts.source]) usage(1, `--source must be all or one of: ${Object.keys(ADAPTERS).join(', ')}`);
+const targetTypes = new Set(opts.targetTypes.filter((type) => type !== 'all'));
+for (const type of targetTypes) {
+  if (!ADAPTERS[type]) usage(1, `--target-type must be all or one of: ${Object.keys(ADAPTERS).join(', ')}`);
+}
 if (!['newest', 'oldest', 'file'].includes(opts.sort)) usage(1, '--sort must be newest, oldest, or file');
 const sinceTime = opts.since ? parseSince(opts.since) : null;
 if (opts.since && sinceTime == null) usage(1, '--since must be today, Nd, or YYYY-MM-DD');
 if (opts.any && opts.regex) usage(1, '--any and --regex cannot be combined');
-const queryRegex = opts.regex ? compileRegex(opts.query, opts.caseSensitive) : null;
+if (opts.candidates && !opts.query) usage(1, '--candidates requires --query');
+if (opts.excludeSessions.some((id) => typeof id !== 'string' || !id.trim())) usage(1, '--exclude-session requires a non-empty ID prefix');
+const queryPattern = opts.regex ? normalizeQueryRegex(opts.query, opts.caseSensitive) : opts.query;
+const queryRegex = opts.regex ? compileRegex(queryPattern, opts.caseSensitive) : null;
 
 // --exclude-re: path-based exclusion, applied wherever session files are enumerated
 // (search, browse, window mode) so an excluded transcript can never surface. This is
@@ -93,6 +117,15 @@ const excludeRes = opts.excludeRe.map((p) => {
   }
 });
 const isExcluded = (file) => excludeRes.some((re) => re.test(file));
+const isExcludedSession = (file) =>
+  opts.excludeSessions.some((prefix) => sessionId(file).startsWith(prefix));
+
+// The output budget is denominated in BYTES (≈ 4 bytes per token): CJK, emoji, and
+// code cost what they actually cost the caller's context, and every rendered line —
+// header, word_hits, hint, omission notices — is charged, so output never exceeds it.
+function bytes(s) {
+  return Buffer.byteLength(s);
+}
 
 // --any: multi-word phrases rarely occur verbatim in transcripts, so match ANY word
 // and rank by how many distinct words a message hits. Low-signal words are dropped
@@ -100,7 +133,10 @@ const isExcluded = (file) => excludeRes.some((re) => re.test(file));
 const STOPWORDS = new Set(['the', 'and', 'was', 'were', 'did', 'does', 'you', 'your', 'why', 'how', 'what', 'when', 'where', 'which', 'who', 'for', 'that', 'this', 'with', 'from', 'have', 'has', 'had', 'are', 'not', 'but', 'about', 'into', 'out', 'our', 'they', 'them', 'then', 'than', 'its', 'get', 'got', 'can', 'could', 'would', 'should', 'ever', 'any', 'all', 'some', 'there']);
 let anyWords = null;
 if (opts.any) {
-  const raw = opts.query.split(/\s+/).filter(Boolean);
+  // Agents commonly express OR alternatives with pipes even though --any already owns
+  // the OR semantics. Treat pipes as delimiters rather than silently searching for
+  // impossible fixed strings such as "federation|graphql".
+  const raw = opts.query.split(/[\s|]+/).filter(Boolean);
   const strong = raw.filter((w) => w.length >= 3 && !STOPWORDS.has(w.toLowerCase()));
   // Dedupe: repeated words must not double-count df or score.
   anyWords = [...new Set((strong.length ? strong : raw).map((w) => (opts.caseSensitive ? w : w.toLowerCase())))];
@@ -111,8 +147,8 @@ if (opts.any) {
 // the standard per-user homes for each tool; roots that don't exist are skipped, so
 // zero config works out of the box. To search a relocated store or a new tool: add an
 // adapter in adapters/ and a line here (this file is yours to edit — the skill is
-// vendored via `npx skills add`), or point SESSION_GREP_SOURCES_FILE at a JSON array of
-// { type, root }, or pass --root DIR for one call. See SKILL.md "Onboarding".
+// vendored via `npx skills add`), or point --sources-file / SESSION_GREP_SOURCES_FILE at a
+// JSON array of { type, root }, or pass --root DIR for one call. See SKILL.md "Onboarding".
 const DEFAULT_SOURCES = [
   { type: 'claude', root: '~/.claude/projects' },
   { type: 'codex', root: '~/.codex/sessions' },
@@ -120,18 +156,29 @@ const DEFAULT_SOURCES = [
   { type: 'pi', root: '~/.pi/agent/sessions' },
 ];
 const sourceNames = Object.keys(ADAPTERS);
-const sourceMap = loadSessionSources({
+let sourceMap = loadSessionSources({
   knownSources: sourceNames,
   defaultSources: DEFAULT_SOURCES,
   rootOverrides: opts.roots,
+  env: { ...process.env, ...(opts.sourcesFile ? { SESSION_GREP_SOURCES_FILE: opts.sourcesFile } : {}) },
 });
-const roots = sourceMap.roots.map((entry) => entry.root).filter((dir) => fs.existsSync(dir));
-// A present-but-broken override silently reverts to defaults; say so on every run so a
-// mistake in SESSION_GREP_SOURCES_FILE never passes as "no override took effect".
+const configErrorReason = (error) => ({ missing: 'does not exist', unparseable: 'is not valid JSON', 'not-an-array': 'must be a JSON array of { type, root }' }[error] ?? 'could not be used');
+// Ambient env config falls back with a warning for compatibility; an explicit
+// --sources-file is a per-call contract and must fail closed.
 if (sourceMap.configError) {
-  const why = { missing: 'does not exist', unparseable: 'is not valid JSON', 'not-an-array': 'must be a JSON array of { type, root }' }[sourceMap.configError] ?? 'could not be used';
+  const why = configErrorReason(sourceMap.configError);
+  if (opts.sourcesFile) usage(1, `--sources-file ${sourceMap.configPath} ${why}`);
   console.error(`session-grep: warning: SESSION_GREP_SOURCES_FILE ${sourceMap.configPath} ${why} — using built-in defaults (see --list-roots)`);
 }
+if (opts.targetRoots.length) {
+  const wanted = new Set(opts.targetRoots.map((root) => path.resolve(expandHome(root))));
+  const filtered = sourceMap.roots.filter((entry) => wanted.has(path.resolve(entry.root)));
+  if (!filtered.length) {
+    usage(1, `--target-root did not match any configured roots. Known roots: ${sourceMap.roots.map((entry) => entry.root).join(', ')}`);
+  }
+  sourceMap = { ...sourceMap, roots: filtered };
+}
+const roots = sourceMap.roots.map((entry) => entry.root).filter((dir) => fs.existsSync(dir));
 if (opts.listRoots) {
   console.log(`origin=${sourceMap.origin}`);
   console.log(`config=${sourceMap.configPath ?? '(none)'}`);
@@ -139,14 +186,7 @@ if (opts.listRoots) {
   for (const entry of sourceMap.roots) console.log(`${entry.type}\texists=${fs.existsSync(entry.root)}\t${entry.root}`);
   process.exit(0);
 }
-if (!roots.length) usage(1, 'No session roots found to search — edit DEFAULT_SOURCES / set SESSION_GREP_SOURCES_FILE (see SKILL.md "Onboarding") or pass --root DIR');
-
-// The output budget is denominated in BYTES (≈ 4 bytes per token): CJK, emoji, and
-// code cost what they actually cost the caller's context, and every rendered line —
-// header, word_hits, hint, omission notices — is charged, so output never exceeds it.
-function bytes(s) {
-  return Buffer.byteLength(s);
-}
+if (!roots.length) usage(1, 'No session roots found to search — edit DEFAULT_SOURCES / pass --sources-file / set SESSION_GREP_SOURCES_FILE (see SKILL.md "Onboarding") or pass --root DIR');
 
 // Browse modes answer "which session?" and "what happened in it?" in one call each —
 // whole-thread questions shouldn't cost 20 grep probes. A skim substitutes for many
@@ -175,15 +215,48 @@ if (opts.session && opts.at != null) {
   // The header is budgeted too: a deep path must not bust a small budget on line one.
   const head = truncate(`window id=${sessionId(file)} messages ${from}..${to} of ${messages.length} path=${file}`, opts.maxChars - 80);
   console.log(head);
-  let size = bytes(head) + 1 + 64; // 64: reserve for the truncation notice
-  for (let i = from; i <= to; i++) {
+  const available = opts.maxChars - bytes(head) - 1 - 80; // 80: reserve for the truncation notice
+  const lineFor = (i, cap) => {
     const m = messages[i];
-    const line = `[${i}]${i === opts.at ? '*' : ' '} ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${truncate(m.text, i === opts.at ? 600 : 300)}`;
-    if (size + bytes(line) + 1 > opts.maxChars) { console.log(`... window truncated by --max-chars at [${i}]`); break; }
-    size += bytes(line) + 1;
-    console.log(line);
+    return `[${i}]${i === opts.at ? '*' : ' '} ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${truncate(m.text, cap)}`;
+  };
+  // Reserve the selected message first, then spend what remains on the nearest context.
+  // Selection happens before chronological rendering, so a tight budget can never consume
+  // five lead-in previews and throw away the stable pointer's actual evidence.
+  const contextReserve = Math.min(2_000, Math.floor(opts.maxChars * 0.35));
+  const targetCap = Math.max(80, available - contextReserve);
+  const selected = new Map([[opts.at, lineFor(opts.at, targetCap)]]);
+  let size = bytes(selected.get(opts.at)) + 1;
+  for (let distance = 1; selected.size < to - from + 1; distance++) {
+    const nearby = [opts.at - distance, opts.at + distance]
+      .filter((index) => index >= from && index <= to);
+    if (!nearby.length) break;
+    for (const index of nearby) {
+      const line = lineFor(index, 300);
+      if (size + bytes(line) + 1 <= available) {
+        selected.set(index, line);
+        size += bytes(line) + 1;
+      }
+    }
+  }
+  for (const index of [...selected.keys()].sort((left, right) => left - right)) {
+    console.log(selected.get(index));
+  }
+  if (selected.size < to - from + 1) {
+    console.log(`... window context truncated by --max-chars; selected [${opts.at}] retained`);
   }
   process.exit(0);
+}
+
+// Once discovery returns a stable ID, a narrower query should stay inside that session
+// instead of reopening global search or forcing a large skim. This is a query scope, not
+// a second command mode; --query + --session + --at remains ambiguous and fails above.
+let scopedSessionFile = null;
+if (opts.query && opts.session) {
+  const scoped = allSessionFiles().filter((file) => sessionId(file).startsWith(opts.session));
+  if (!scoped.length) usage(1, `No session file matching id prefix "${opts.session}" under: ${roots.join(', ')}`);
+  if (scoped.length > 1) usage(1, `Session id prefix "${opts.session}" is ambiguous across ${scoped.length} files; provide a longer stable ID`);
+  [scopedSessionFile] = scoped;
 }
 
 const rg = spawnSync('rg', [
@@ -192,8 +265,8 @@ const rg = spawnSync('rg', [
   '--files-with-matches',
   '--glob',
   '*.jsonl',
-  ...(anyWords ? anyWords.flatMap((w) => ['-e', w]) : [opts.query]),
-  ...roots,
+  ...(anyWords ? [...anyWords.flatMap((w) => ['-e', w]), '--'] : ['--', queryPattern]),
+  ...(scopedSessionFile ? [scopedSessionFile] : roots),
 ], { encoding: 'utf8' });
 
 if (rg.error) {
@@ -212,7 +285,7 @@ if (rg.status === 2 && opts.regex) {
 }
 // rg enumerates files in nondeterministic (parallel-walk) order; sort so identical
 // invocations rank ties identically.
-files = files.filter((f) => !isExcluded(f)).sort();
+files = files.filter((f) => !isExcluded(f) && !isExcludedSession(f)).sort();
 const matches = [];
 const q = opts.caseSensitive ? opts.query : opts.query.toLowerCase();
 // --any rarity stats: document frequency per word across scanned messages. Rare words
@@ -224,7 +297,7 @@ let messagesScanned = 0;
 
 for (const file of files) {
   const source = sourceOf(file);
-  if (opts.source !== 'all' && source !== opts.source) continue;
+  if (targetTypes.size && !targetTypes.has(source)) continue;
   let raw;
   try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
   const messages = parseMessages(raw, source);
@@ -272,7 +345,9 @@ if (anyWords) {
   matches.sort((a, b) => b.score - a.score || (opts.sort === 'oldest' ? a.time - b.time : b.time - a.time) || stable(a, b));
 } else if (opts.sort === 'newest') matches.sort((a, b) => b.time - a.time || stable(a, b));
 else if (opts.sort === 'oldest') matches.sort((a, b) => a.time - b.time || stable(a, b));
-const limited = matches.slice(0, opts.limit);
+const candidates = opts.candidates ? groupCandidates(matches) : null;
+const rankedEntries = candidates ?? matches;
+const limited = rankedEntries.slice(0, opts.limit);
 
 // Zero hits should steer the next query, not dead-end the agent: multi-word literal
 // phrases almost never occur verbatim in transcripts — say so and point at --any.
@@ -294,13 +369,33 @@ const wordStats = anyWords
 // caller's context. The REAL header, word_hits, hint, and omission lines are charged
 // against the budget (not a fixed allowance), then hits are selected in rank order.
 // Two invariants:
-//  - Monotone: entries render at a fixed size, so selection is a strict rank-order
-//    prefix — raising the budget can only extend the emitted set, never reshuffle it.
+//  - Monotone: entries render at a fixed size for a given invocation shape, so
+//    selection is a strict rank-order prefix — raising the budget can only extend
+//    the emitted set, never reshuffle it.
 //  - Evidence outranks metadata: whenever the fixed lines can't fit (zero-hit df
 //    tables included) the word_hits table is dropped, and before returning shown=0
 //    with matches present the top hit is hard-shrunk (text first, path last).
-const OMIT = (n) => `... ${n} more matching messages omitted by the ${opts.maxChars}-byte output budget — narrow with --role/--since${opts.any ? '/rarer words' : ''}, or raise --max-chars`;
+const OMIT = (n) => `... ${n} more matching ${opts.candidates ? 'sessions' : 'messages'} omitted by the ${opts.maxChars}-byte output budget — ${scopedSessionFile
+  ? 'stay in this --session scope; reduce --before/--after, use --sort oldest for chronology, or raise --max-chars'
+  : `narrow with --role/--since${opts.any ? '/rarer words' : ''}, or raise --max-chars`}`;
 const queryEcho = truncate(opts.query, 120); // a 2k-char query must not eat the budget echoing itself
+
+// Adaptive previews: with few hits and a roomy budget, spend the aperture on fuller
+// match text instead of leaving it unspent (a complete short decision should never
+// be clipped at 300 when the budget could carry all of it). Caps are bytes.
+const CONTEXT_PREVIEW_CHARS = 180;
+const MIN_MATCH_PREVIEW_CHARS = 300;
+const ENTRY_OVERHEAD_CHARS = 220;
+const HEADER_ALLOWANCE_ESTIMATE = 300;
+const entryShare = Math.max(
+  MIN_MATCH_PREVIEW_CHARS,
+  Math.floor((opts.maxChars - HEADER_ALLOWANCE_ESTIMATE) / Math.max(1, limited.length)),
+);
+const matchPreviewChars = (entry) => Math.max(
+  MIN_MATCH_PREVIEW_CHARS,
+  entryShare - ENTRY_OVERHEAD_CHARS -
+    (opts.candidates ? 0 : entry.before.length + entry.after.length) * (CONTEXT_PREVIEW_CHARS + 20),
+);
 
 function selectWithinBudget(renderLen, budget) {
   const emitted = [];
@@ -334,13 +429,15 @@ function forceOneHit(renderLen, budget) {
 }
 
 if (opts.json) {
-  const slim = (msg) => ({ role: msg.role, text: truncate(msg.text, 300), timestamp: msg.timestamp });
-  const toEntry = (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, before: m.before.map(slim), match: slim(m.match), after: m.after.map(slim) });
+  const slim = (msg, chars) => ({ role: msg.role, text: truncate(msg.text, chars), timestamp: msg.timestamp });
+  const toEntry = opts.candidates
+    ? (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, hitCount: m.hitCount, ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, match: slim(m.match, matchPreviewChars(m)) })
+    : (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, before: m.before.map((message) => slim(message, CONTEXT_PREVIEW_CHARS)), match: slim(m.match, matchPreviewChars(m)), after: m.after.map((message) => slim(message, CONTEXT_PREVIEW_CHARS)) });
   const entryLen = (m) => bytes(JSON.stringify(toEntry(m))) + 1;
   let withStats = !!anyWords;
   // Worst-case envelope (max shown/omitted digits, omission note included, trailing
   // newline) so the real output can only come in at or under the charged size.
-  const envelope = (matchesArr, shown, omitted) => ({ query: queryEcho, regex: opts.regex, any: !!opts.any, ...(withStats ? { wordHits: wordDf, messagesScanned } : {}), rawFilesWithHits: files.length, totalMatches: matches.length, shown, ...(omitted ? { omittedByBudget: omitted, note: OMIT(omitted) } : {}), ...(hint ? { hint } : {}), matches: matchesArr });
+  const envelope = (entriesArr, shown, omitted) => ({ query: queryEcho, ...(scopedSessionFile ? { session: sessionId(scopedSessionFile) } : {}), regex: opts.regex, any: !!opts.any, ...(withStats ? { wordHits: wordDf, messagesScanned } : {}), rawFilesWithHits: files.length, totalMatches: matches.length, ...(candidates ? { totalCandidateSessions: candidates.length } : {}), ...(opts.excludeSessions.length ? { excludedSessions: opts.excludeSessions } : {}), shown, ...(omitted ? { omittedByBudget: omitted, note: OMIT(omitted) } : {}), ...(hint ? { hint } : {}), [opts.candidates ? 'candidates' : 'matches']: entriesArr });
   const room = (withOmit) => opts.maxChars - bytes(JSON.stringify(envelope([], limited.length, withOmit ? limited.length : 0))) - 1;
   // A df table that can't fit is dropped even with zero hits — the ceiling binds always.
   if (withStats && room(false) < 0) withStats = false;
@@ -358,17 +455,23 @@ if (opts.json) {
   }
   console.log(JSON.stringify(envelope(emitted.map(toEntry), emitted.length, limited.length - emitted.length)));
 } else {
-  const renderLines = (m) => [
-    `${m.source} id=${m.id} idx=${m.index} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] score=${m.score}` : ''}`,
-    `path=${m.path}`,
-    ...m.before.map((b) => `  before ${b.role}: ${truncate(b.text, 180)}`),
-    `  MATCH ${m.match.role}: ${truncate(m.match.text, 300)}`,
-    ...m.after.map((a) => `  after  ${a.role}: ${truncate(a.text, 180)}`),
-  ];
+  const renderLines = opts.candidates
+    ? (m) => [
+        `${m.source} id=${m.id} best_idx=${m.index} hits=${m.hitCount} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] best_score=${m.score}` : ''}`,
+        `path=${m.path}`,
+        `  BEST ${m.match.role}: ${truncate(m.match.text, matchPreviewChars(m))}`,
+      ]
+    : (m) => [
+        `${m.source} id=${m.id} idx=${m.index} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] score=${m.score}` : ''}`,
+        `path=${m.path}`,
+        ...m.before.map((b) => `  before ${b.role}: ${truncate(b.text, CONTEXT_PREVIEW_CHARS)}`),
+        `  MATCH ${m.match.role}: ${truncate(m.match.text, matchPreviewChars(m))}`,
+        ...m.after.map((a) => `  after  ${a.role}: ${truncate(a.text, CONTEXT_PREVIEW_CHARS)}`),
+      ];
   // "\n[N] " between entries grows with the hit number — charge the widest it can get.
-  const idxOverhead = String(Math.min(limited.length, opts.limit)).length + 4;
+  const idxOverhead = String(limited.length).length + 4;
   const entryLen = (m) => renderLines(m).reduce((t, l) => t + bytes(l) + 1, idxOverhead);
-  const header = (shown) => `query=${JSON.stringify(queryEcho)}${opts.regex ? ' regex=true' : ''}${opts.any ? ` any=true` : ''} raw_files_with_hits=${files.length} total_message_matches=${matches.length} shown=${shown} sort=${opts.sort}${opts.since ? ` since=${opts.since}` : ''}${opts.caseSensitive ? ' case_sensitive=true' : ''}`;
+  const header = (shown) => `query=${JSON.stringify(queryEcho)}${scopedSessionFile ? ` session=${sessionId(scopedSessionFile)}` : ''}${opts.regex ? ' regex=true' : ''}${opts.any ? ` any=true` : ''}${opts.candidates ? ` candidate_sessions=${candidates.length}` : ''} raw_files_with_hits=${files.length} total_message_matches=${matches.length} shown=${shown} sort=${opts.sort}${opts.since ? ` since=${opts.since}` : ''}${opts.caseSensitive ? ' case_sensitive=true' : ''}${opts.excludeSessions.length ? ` excluded_sessions=[${opts.excludeSessions.join(',')}]` : ''}`;
   let wordStatsLine = wordStats ? `word_hits: ${truncate(wordStats, 300)} (of ${messagesScanned} messages searched after filters; high-count words are low-signal — prefer the rare ones)` : null;
   const hintLine = hint ? `hint: ${hint}` : null;
   const room = (withOmit) => opts.maxChars
@@ -402,6 +505,33 @@ if (opts.json) {
   if (omitted) console.log(`\n${OMIT(omitted)}`);
 }
 
+function groupCandidates(sortedMatches) {
+  const grouped = new Map();
+  for (const match of sortedMatches) {
+    let candidate = grouped.get(match.id);
+    if (!candidate) {
+      candidate = {
+        source: match.source,
+        id: match.id,
+        path: match.path,
+        index: match.index,
+        timestamp: match.timestamp,
+        time: match.time,
+        score: match.score,
+        matchedWords: [],
+        hitCount: 0,
+        match: match.match,
+      };
+      grouped.set(match.id, candidate);
+    }
+    candidate.hitCount += 1;
+    for (const word of match.matchedWords ?? []) {
+      if (!candidate.matchedWords.includes(word)) candidate.matchedWords.push(word);
+    }
+  }
+  return [...grouped.values()];
+}
+
 function sourceOf(file) {
   const configured = configuredSourceOf(file, sourceMap, sourceNames);
   if (configured) return configured;
@@ -424,7 +554,16 @@ function parseMessages(raw, source) {
 }
 
 function sessionId(file) {
-  return path.basename(file, '.jsonl');
+  const stem = path.basename(file, '.jsonl');
+  // Codex stores the canonical session id in session_meta, while its standard filename
+  // prefixes that UUID with a rollout timestamp. Owner Operator and other indexes retain
+  // the canonical UUID, so browse/drill-in must accept that same id. Keep non-standard
+  // fixture and relocated filenames unchanged rather than guessing at their structure.
+  if (sourceOf(file) === 'codex') {
+    const uuid = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(stem)?.[1];
+    if (uuid) return uuid;
+  }
+  return stem;
 }
 
 function round3(x) {
@@ -436,7 +575,7 @@ function allSessionFiles() {
   for (const root of roots) {
     for (const entry of fs.readdirSync(root, { recursive: true })) {
       const p = path.join(root, String(entry));
-      if (p.endsWith('.jsonl') && !isExcluded(p) && fs.statSync(p).isFile()) out.push(p);
+      if (p.endsWith('.jsonl') && !isExcluded(p) && !isExcludedSession(p) && fs.statSync(p).isFile()) out.push(p);
     }
   }
   return out.sort(); // readdir order varies; keep browse/window resolution deterministic
@@ -448,71 +587,83 @@ function allSessionFiles() {
 // head/tail preserved and the middle sampled evenly to fit the output budget. Indexes
 // are printed so specifics can be drilled with a targeted --query afterwards.
 function browse() {
-  const files = allSessionFiles().filter((file) => opts.source === 'all' || sourceOf(file) === opts.source);
+  const files = allSessionFiles().filter((file) => !targetTypes.size || targetTypes.has(sourceOf(file)));
   if (opts.skim) {
     const file = files.find((f) => sessionId(f).startsWith(opts.skim));
     if (!file) usage(1, `No session file matching id prefix "${opts.skim}" under: ${roots.join(', ')}`);
     const messages = parseMessages(fs.readFileSync(file, 'utf8'), sourceOf(file));
-    const lines = messages.map((m, i) => `[${i}] ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${truncate(m.text, 200)}`);
+    const line = (m, i, cap) => `[${i}] ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${cap == null ? m.text.replace(/\s+/g, ' ').trim() : truncate(m.text, cap)}`;
     // The header is budgeted too: a deep path must not bust a small budget on line one.
-    const head0 = truncate(`skim id=${sessionId(file)} messages=${messages.length} path=${file}`, opts.maxChars - 80);
-    console.log(head0);
-    const available = opts.maxChars - bytes(head0) - 2; // hard byte ceiling for everything below the header
-    const sizeOf = (ls) => ls.reduce((t, l) => t + bytes(l) + 1, 0);
-    if (sizeOf(lines) <= available) {
-      for (const l of lines) console.log(l);
+    const header = truncate(`skim id=${sessionId(file)} messages=${messages.length} path=${file}`, opts.maxChars - 160);
+    // A short conversation should be lossless: --max-chars is the actual aperture. The old
+    // eager 200-char clip discarded decisive facts even when the complete session was only
+    // ~1KB, forcing agents into repeated synonym queries that could never recover the tail.
+    const fullLines = messages.map((m, i) => line(m, i, null));
+    const fullOutput = `${[header, ...fullLines].join('\n')}\n`;
+    if (bytes(fullOutput) <= opts.maxChars) {
+      process.stdout.write(fullOutput);
       return;
     }
-    const avg = sizeOf(lines) / lines.length;
-    // Budget is authoritative — no minimum floor (codex review: keep>=20 blew small
-    // budgets). Head/tail sizes scale down with the budget; middle picks are CENTERED
-    // in their strides so low sample counts don't cluster at the start of the middle.
-    // The average only ESTIMATES the sample count; the assembled output (sampled-out
-    // notices included) is then measured in bytes, and middle picks — then edge
-    // lines, down to one head and one tail — are dropped until it fits, so the
-    // ceiling always holds and head/tail survive at every budget that can hold them.
-    const keep = Math.max(3, Math.floor(available / avg));
-    const edge = Math.min(10, Math.floor(keep / 3), Math.floor(lines.length / 2));
-    let headKeep = Math.max(1, edge);
-    let tailKeep = Math.min(Math.max(1, edge), lines.length - headKeep);
-    const middleKeep = Math.max(0, keep - headKeep - tailKeep);
-    const middle = lines.length - headKeep - tailKeep;
-    const stride = middleKeep > 0 ? middle / middleKeep : Infinity;
-    let picks = [];
-    for (let i = 0; i < middleKeep; i++) picks.push(headKeep + Math.min(middle - 1, Math.floor((i + 0.5) * stride)));
-    const assemble = (midPicks, h, t) => {
-      const chosen = new Set(midPicks.filter((i) => i >= h && i < lines.length - t));
-      for (let i = 0; i < h; i++) chosen.add(i);
-      for (let i = lines.length - t; i < lines.length; i++) chosen.add(i);
-      const out = [];
-      let skipped = 0;
-      for (let i = 0; i < lines.length; i++) {
-        if (chosen.has(i)) {
-          if (skipped) out.push(`  ... ${skipped} messages sampled out (drill in with --query on anything above/below) ...`);
-          skipped = 0;
-          out.push(lines[i]);
-        } else {
-          skipped++;
-        }
-      }
-      if (skipped) out.push(`  ... ${skipped} messages sampled out ...`);
-      return out;
+    // Large sessions retain the eval-proven sampled conversational spine.
+    const lines = messages.map((m, i) => line(m, i, 200));
+    const total = lines.reduce((t, l) => t + bytes(l) + 1, 0);
+    const avg = total / lines.length;
+    const sampleIndexes = (keep) => {
+      if (keep <= 1) return [0];
+      if (keep === 2) return [0, lines.length - 1];
+      // Head/tail sizes scale down with the budget; middle picks are CENTERED in their
+      // strides so low sample counts do not cluster at the start of the middle.
+      const edge = Math.min(10, Math.floor(keep / 3), Math.floor(lines.length / 2));
+      const head = Math.max(1, edge);
+      const tail = Math.min(Math.max(1, edge), lines.length - head);
+      const middleKeep = Math.max(0, keep - head - tail);
+      const middle = lines.length - head - tail;
+      const stride = middleKeep > 0 ? middle / middleKeep : Infinity;
+      const chosen = new Set();
+      for (let i = 0; i < head; i++) chosen.add(i);
+      for (let i = 0; i < middleKeep; i++) chosen.add(head + Math.min(middle - 1, Math.floor((i + 0.5) * stride)));
+      for (let i = lines.length - tail; i < lines.length; i++) chosen.add(i);
+      return [...chosen].sort((a, b) => a - b);
     };
-    let out = assemble(picks, headKeep, tailKeep);
-    while (sizeOf(out) > available && (picks.length || headKeep + tailKeep > 2)) {
-      if (picks.length) picks = picks.slice(0, -1);
-      else if (headKeep >= tailKeep && headKeep > 1) headKeep--;
-      else tailKeep--;
-      out = assemble(picks, headKeep, tailKeep);
+    const renderSample = (indexes) => {
+      const output = [header];
+      let previous = -1;
+      for (const index of indexes) {
+        const skipped = index - previous - 1;
+        if (skipped) output.push(`  ... ${skipped} messages sampled out (drill in with --query on anything above/below) ...`);
+        output.push(lines[index]);
+        previous = index;
+      }
+      const trailing = lines.length - previous - 1;
+      if (trailing) output.push(`  ... ${trailing} messages sampled out ...`);
+      return `${output.join('\n')}\n`;
+    };
+    // The average only ESTIMATES the sample count; the complete rendered result (headers
+    // and sampling markers included) is then measured in BYTES and the sample reduced
+    // until the requested aperture is truly honored.
+    const minimumKeep = lines.length >= 2 ? 2 : 1;
+    let keep = Math.min(lines.length, Math.max(minimumKeep, Math.floor((opts.maxChars - bytes(header) - 1) / Math.max(1, avg))));
+    let sampledOutput = '';
+    while (keep >= minimumKeep) {
+      sampledOutput = renderSample(sampleIndexes(keep));
+      if (bytes(sampledOutput) <= opts.maxChars) break;
+      keep--;
     }
-    if (sizeOf(out) > available && lines.length >= 2) {
-      // One head + one tail still over: shrink the two lines themselves.
+    if (bytes(sampledOutput) <= opts.maxChars) {
+      process.stdout.write(sampledOutput);
+      return;
+    }
+    // Even at the minimum aperture, retain both ends. Shrink their previews only
+    // after reducing the sampled spine to its head and tail.
+    if (lines.length >= 2) {
       const notice = `  ... ${lines.length - 2} messages sampled out ...`;
-      const share = Math.max(40, Math.floor((available - bytes(notice) - 3) / 2));
-      out = [truncate(lines[0], share), notice, truncate(lines[lines.length - 1], share)];
+      const fixedBytes = bytes(header) + bytes(notice) + 4; // four rendered newlines
+      const share = Math.max(1, Math.floor((opts.maxChars - fixedBytes) / 2));
+      const fallback = `${[header, truncate(lines[0], share), notice, truncate(lines[lines.length - 1], share)].join('\n')}\n`;
+      process.stdout.write(fallback);
+      return;
     }
-    if (sizeOf(out) > available) out = [truncate(lines[0], Math.max(40, available - 1))];
-    for (const l of out) console.log(l);
+    process.stdout.write(`${header}\n${truncate(lines[0], Math.max(1, opts.maxChars - bytes(header) - 2))}\n`);
     return;
   }
 
@@ -591,9 +742,17 @@ function compileRegex(pattern, caseSensitive) {
   }
 }
 
+function normalizeQueryRegex(pattern, caseSensitive) {
+  if (!pattern.startsWith('(?i)')) return pattern;
+  if (caseSensitive) usage(1, '--case-sensitive conflicts with the leading (?i) regex modifier');
+  const normalized = pattern.slice(4);
+  if (!normalized) usage(1, '--regex needs a pattern after the leading (?i) modifier');
+  return normalized;
+}
+
 function usage(code, msg) {
   if (msg) console.error(msg);
-  console.error('Usage: session-grep.mjs --query TEXT [--any] [--regex] [--limit N] [--before N] [--after N] [--role user|assistant|all] [--source claude|codex|pi|all] [--since today|Nd|YYYY-MM-DD] [--sort newest|oldest|file] [--root DIR ...] [--exclude-re REGEX ...] [--max-chars BYTES | --max-tokens N] [--include-tools] [--case-sensitive] [--json] | --overview | --skim ID | --session ID --at INDEX | --list-roots | --self-test');
+  console.error('Usage: session-grep.mjs --query TEXT [--session ID] [--any] [--candidates] [--regex] [--limit N] [--before N] [--after N] [--role user|assistant|all] [--target-type claude|codex|pi|all ...] [--source claude|codex|pi|all] [--since today|Nd|YYYY-MM-DD] [--sort newest|oldest|file] [--root DIR ...] [--sources-file FILE] [--target-root DIR ...] [--exclude-session ID_PREFIX ...] [--exclude-re REGEX ...] [--max-chars BYTES | --max-tokens N] [--include-tools] [--case-sensitive] [--json] | --overview | --skim ID | --session ID --at INDEX | --list-roots | --self-test');
   process.exit(code);
 }
 
@@ -623,16 +782,21 @@ async function selfTest() {
   for (let i = 0; i < 20; i++) cj += line(i % 2 ? 'assistant' : 'user', text(`現地時間のバグについての議論 その${i} — タイムゾーン変換が失敗する`), `2026-06-03T10:${String(i).padStart(2, '0')}:00Z`);
   fs.writeFileSync(path.join(proj, 'cjkcjk11.jsonl'), cj);
   // Session B: small, distinct.
+  const completeShortDecision = `quixotic deployment answered with a --units flag and lookahead syntax note ${'supporting detail '.repeat(24)}FINAL-QUIXOTIC-DECISION`;
   fs.writeFileSync(path.join(proj, 'bbbb2222.jsonl'),
     line('user', text('opening question about quixotic deployment'), '2026-06-05T09:00:00Z') +
-    line('assistant', text('quixotic deployment answered with lookahead syntax note'), '2026-06-05T09:01:00Z'));
+    line('assistant', text(completeShortDecision), '2026-06-05T09:01:00Z'));
+  // Session H: long lead-in proves a tight window always retains its selected pointer.
+  fs.writeFileSync(path.join(proj, 'hhhh5555.jsonl'),
+    Array.from({ length: 6 }, (_, i) => line('user', text(`long lead-in ${i} ${'context '.repeat(90)}`), `2026-06-06T09:0${i}:00Z`)).join('') +
+    line('assistant', text('ANCHOR-TARGET survives its context budget'), '2026-06-06T09:06:00Z'));
   // Session C: codex format (exercises the adapter registry + path detection).
   fs.mkdirSync(path.join(dir, 'codex'), { recursive: true });
   const codexLine = (role, t, ts) => JSON.stringify({ type: 'response_item', timestamp: ts, payload: { type: 'message', role, content: [{ type: 'output_text', text: t }] } }) + '\n';
   fs.writeFileSync(path.join(dir, 'codex', 'rollout-cccc.jsonl'),
     codexLine('assistant', 'zorptastic reply straight from the codex adapter', '2026-06-07T08:00:00Z'));
   // Same Codex format under a root whose path does not reveal the format. This
-  // exercises the SESSION_GREP_SOURCES_FILE override as the source of truth for parsing.
+  // exercises typed source-file overrides as the source of truth for parsing.
   fs.mkdirSync(path.join(dir, 'relocated'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'relocated', 'rollout-dddd.jsonl'),
     codexLine('assistant', 'relocatedsource reply from a configured codex root', '2026-06-08T08:00:00Z'));
@@ -679,6 +843,19 @@ async function selfTest() {
     check('any dedupes words', Object.keys(any.wordHits).length === 2);
     check('rare word ranks first', any.matches[0].matchedWords.includes('flumoxide'));
     check('word df counted', any.wordHits.sidebar > any.wordHits.flumoxide);
+    const pipeAny = JSON.parse(run(['--query', 'sidebar|flumoxide|absentword', '--any', '--json']));
+    check('--any treats pipe separators as term delimiters',
+      pipeAny.totalMatches > 0 &&
+      Object.keys(pipeAny.wordHits).join(',') === 'sidebar,flumoxide,absentword');
+    const completePreview = run(['--query', 'quixotic', '--before', '0', '--after', '0', '--limit', '2', '--max-chars', '4000']);
+    check('query preserves a complete short message when it fits the output aperture',
+      completePreview.includes('FINAL-QUIXOTIC-DECISION'));
+    const leadingDash = JSON.parse(run(['--query', '--units', '--json']));
+    check('literal query beginning with dashes reaches ripgrep as a pattern', leadingDash.totalMatches === 1);
+    const candidates = JSON.parse(run(['--query', 'deployment sidebar', '--any', '--candidates', '--limit', '2', '--json']));
+    check('--candidates groups before limit', candidates.totalCandidateSessions === 2 && candidates.candidates.length === 2);
+    check('--candidates retains distinct sessions', new Set(candidates.candidates.map((c) => c.id)).size === 2);
+    check('--candidates reports full hit count', candidates.candidates.find((c) => c.id === 'aaaa1111').hitCount > 2);
 
     // budget enforcement: the budget is a hard byte ceiling, all lines charged
     const tiny = run(['--query', 'sidebar', '--limit', '30', '--max-chars', '600']);
@@ -737,34 +914,42 @@ async function selfTest() {
     // regex incl. JS-only syntax (lookahead) falling back past rg
     const la = JSON.parse(run(['--regex', '--query', 'quixotic(?= deployment)', '--json']));
     check('JS-only regex still matches via fallback', la.totalMatches === 2);
+    const inlineCase = JSON.parse(run(['--regex', '--query', '(?i)QUIXOTIC', '--json']));
+    check('common leading (?i) regex modifier is accepted', inlineCase.totalMatches === 2);
 
     // overview + spine
     const ov = run(['--overview']);
     check('overview lists both sessions', ov.includes('aaaa1111') && ov.includes('bbbb2222'));
-    const ovCodex = run(['--overview', '--source', 'codex']);
-    check('overview honors --source', ovCodex.includes('rollout-cccc') && !ovCodex.includes('aaaa1111') && !ovCodex.includes('bbbb2222'));
+    const ovCodex = run(['--overview', '--target-type', 'codex']);
+    check('overview honors --target-type', ovCodex.includes('rollout-cccc') && !ovCodex.includes('aaaa1111') && !ovCodex.includes('bbbb2222'));
     const ovRecent = run(['--overview', '--since', '2026-06-06']);
     check('overview honors --since', ovRecent.includes('rollout-cccc') && !ovRecent.includes('aaaa1111') && !ovRecent.includes('bbbb2222'));
     const spine = run(['--skim', 'aaaa1111', '--max-chars', '900']);
-    check('skim within byte budget', Buffer.byteLength(spine) <= 900);
+    check('skim rendered output stays within byte budget', Buffer.byteLength(spine) <= 900);
     check('skim keeps head', spine.includes('number 0'));
     check('skim keeps tail', spine.includes('session alpha'));
+    const scopedQuery = JSON.parse(run(['--query', 'sidebar', '--session', 'aaaa1111', '--json']));
+    check('query can scope to one stable session', scopedQuery.session === 'aaaa1111' && scopedQuery.matches.every((match) => match.id === 'aaaa1111'));
+    const mixedModes = spawnSync(process.execPath, [self, '--query', 'sidebar', '--session', 'aaaa1111', '--at', '0', '--root', dir], { encoding: 'utf8' });
+    check('ambiguous query + window modes fail closed', mixedModes.status === 1 && mixedModes.stderr.includes('choose exactly one mode'));
 
     // role filter still works
     const role = JSON.parse(run(['--query', 'sidebar', '--role', 'user', '--json']));
     check('role filter', role.matches.every((m) => m.match.role === 'user'));
 
-    // adapter registry: codex format parsed, source detected from path, --source filters
+    // adapter registry: codex format parsed, source detected from path, --target-type filters
     const cx = JSON.parse(run(['--query', 'zorptastic', '--json']));
     check('codex adapter parses', cx.totalMatches === 1 && cx.matches[0].source === 'codex');
-    const cxOnly = JSON.parse(run(['--query', 'zorptastic', '--source', 'claude', '--json']));
-    check('--source filters by adapter', cxOnly.totalMatches === 0);
+    const cxOnly = JSON.parse(run(['--query', 'zorptastic', '--target-type', 'claude', '--json']));
+    check('--target-type filters by adapter', cxOnly.totalMatches === 0);
+    const cxLegacy = JSON.parse(run(['--query', 'zorptastic', '--source', 'claude', '--json']));
+    check('--source remains a compatibility alias for --target-type', cxLegacy.totalMatches === 0);
 
     // pi adapter: format parsed, source detected from path, toolResult gated by --include-tools
     const pi = JSON.parse(run(['--query', 'plumbuscal', '--json']));
     check('pi adapter parses user+assistant', pi.totalMatches === 2 && pi.matches.every((m) => m.source === 'pi'));
-    const piOnly = JSON.parse(run(['--query', 'zorptastic', '--source', 'pi', '--json']));
-    check('--source pi filters by adapter', piOnly.totalMatches === 0);
+    const piOnly = JSON.parse(run(['--query', 'zorptastic', '--target-type', 'pi', '--json']));
+    check('--target-type pi filters by adapter', piOnly.totalMatches === 0);
     const piNoise = JSON.parse(run(['--query', 'PINOISE', '--json']));
     check('pi toolResult excluded by default', piNoise.totalMatches === 0);
     const piTools = JSON.parse(run(['--query', 'PINOISE', '--json', '--include-tools']));
@@ -783,6 +968,10 @@ async function selfTest() {
     check('--exclude-re honored by --session/--at', winExcluded.status === 1 && !winExcluded.stdout.includes('flumoxide'));
     const badRe = spawnSync(process.execPath, [self, '--query', 'x', '--root', dir, '--exclude-re', '('], { encoding: 'utf8' });
     check('invalid --exclude-re rejected', badRe.status === 1 && badRe.stderr.includes('--exclude-re'));
+    const excludedSession = JSON.parse(run(['--query', 'sidebar', '--json', '--exclude-session', 'aaaa']));
+    check('--exclude-session removes canonical session id', excludedSession.totalMatches === 0 && excludedSession.excludedSessions[0] === 'aaaa');
+    const sessionWindowExcluded = spawnSync(process.execPath, [self, '--session', 'aaaa1111', '--at', '0', '--root', dir, '--exclude-session', 'aaaa'], { encoding: 'utf8' });
+    check('--exclude-session applies to direct modes when explicitly passed', sessionWindowExcluded.status === 1);
 
     const sourcesFile = path.join(dir, 'session_sources.json');
     fs.writeFileSync(sourcesFile, JSON.stringify([
@@ -792,13 +981,27 @@ async function selfTest() {
     ]));
     const configured = JSON.parse(runRaw(['--query', 'relocatedsource', '--json'], { SESSION_GREP_SOURCES_FILE: sourcesFile }));
     check('session_sources type routes codex parser', configured.totalMatches === 1 && configured.matches[0].source === 'codex');
+    const configuredViaFlag = JSON.parse(runRaw(['--query', 'relocatedsource', '--json', '--sources-file', sourcesFile]));
+    check('--sources-file type routes codex parser', configuredViaFlag.totalMatches === 1 && configuredViaFlag.matches[0].source === 'codex');
+    const envOnlySourcesFile = path.join(dir, 'env_only_sources.json');
+    fs.writeFileSync(envOnlySourcesFile, JSON.stringify([{ type: 'claude', root: path.join(dir, 'moved') }]));
+    const flagWins = JSON.parse(runRaw(['--query', 'relocatedsource', '--json', '--sources-file', sourcesFile], { SESSION_GREP_SOURCES_FILE: envOnlySourcesFile }));
+    check('--sources-file wins over SESSION_GREP_SOURCES_FILE', flagWins.totalMatches === 1 && flagWins.matches[0].source === 'codex');
+    const targetedPi = JSON.parse(runRaw(['--query', 'relocatedpi', '--json', '--sources-file', sourcesFile, '--target-root', path.join(dir, 'relocated-pi')]));
+    check('--target-root narrows to configured root and keeps parser mapping', targetedPi.totalMatches === 1 && targetedPi.matches[0].source === 'pi');
+    const targetedMiss = JSON.parse(runRaw(['--query', 'relocatedsource', '--json', '--sources-file', sourcesFile, '--target-root', path.join(dir, 'relocated-pi')]));
+    check('--target-root excludes other configured roots', targetedMiss.totalMatches === 0);
+    const missingExplicit = spawnSync(process.execPath, [self, '--list-roots', '--sources-file', path.join(dir, 'missing_sources.json')], { encoding: 'utf8' });
+    check('missing explicit --sources-file fails closed', missingExplicit.status === 1 && missingExplicit.stderr.includes('--sources-file') && !missingExplicit.stdout.includes('origin='));
+    const rootAndSources = spawnSync(process.execPath, [self, '--query', 'x', '--root', dir, '--sources-file', sourcesFile], { encoding: 'utf8' });
+    check('--root and --sources-file cannot be combined silently', rootAndSources.status === 1 && rootAndSources.stderr.includes('cannot be combined'));
     const configuredClaude = JSON.parse(runRaw(['--query', 'movedclaude', '--json'], { SESSION_GREP_SOURCES_FILE: sourcesFile }));
     check('session_sources type routes claude parser', configuredClaude.totalMatches === 1 && configuredClaude.matches[0].source === 'claude');
     const configuredPi = JSON.parse(runRaw(['--query', 'relocatedpi', '--json'], { SESSION_GREP_SOURCES_FILE: sourcesFile }));
     check('session_sources type routes pi parser', configuredPi.totalMatches === 1 && configuredPi.matches[0].source === 'pi');
     const listed = runRaw(['--list-roots'], { SESSION_GREP_SOURCES_FILE: sourcesFile });
     check('--list-roots shows configured root', listed.includes(`config=${sourcesFile}`) && listed.includes(path.join(dir, 'relocated')));
-    // A malformed local config must be flagged, not silently swapped for the defaults.
+    // A malformed env config falls back for compatibility, but must be flagged.
     const badFile = path.join(dir, 'bad_sources.json');
     fs.writeFileSync(badFile, '{ "disable": ["codex"], not-valid ]');
     const bad = spawnSync(process.execPath, [self, '--list-roots'], { encoding: 'utf8', env: { ...process.env, SESSION_GREP_SOURCES_FILE: badFile } });
@@ -810,6 +1013,8 @@ async function selfTest() {
     const win = run(['--session', hit.id.slice(0, 6), '--at', String(hit.index)]);
     check('window centers on the hit', win.includes(`[${hit.index}]*`) && win.includes('flumoxide'));
     check('window includes neighbors', win.includes(`[${hit.index - 1}] `) && win.includes(`[${hit.index + 1}] `));
+    const tightWin = run(['--session', 'hhhh5555', '--at', '6', '--before', '5', '--after', '0', '--max-chars', '500']);
+    check('tight window always retains selected target', tightWin.includes('[6]*') && tightWin.includes('ANCHOR-TARGET'));
   } catch (error) {
     failures.push(`crashed: ${error.message}`);
   } finally {

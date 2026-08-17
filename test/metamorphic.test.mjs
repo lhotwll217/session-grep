@@ -130,10 +130,10 @@ test('--max-tokens N is exactly --max-chars 4N', { skip }, () => {
   assert.equal(byTokens, byChars);
 });
 
-test('--session without --at is rejected, not silently ignored', { skip }, () => {
-  const res = spawnSync(process.execPath, [GREP, '--query', 'koala9', '--session', 'claudeaaaa', '--root', root], { encoding: 'utf8' });
+test('--session without a query or --at is rejected, not silently ignored', { skip }, () => {
+  const res = spawnSync(process.execPath, [GREP, '--session', 'claudeaaaa', '--root', root], { encoding: 'utf8' });
   assert.equal(res.status, 1);
-  assert.match(res.stderr, /--session requires --at/);
+  assert.match(res.stderr, /--session requires --query TEXT or --at INDEX/);
 });
 
 test('budget monotonicity: raising --max-chars never shrinks the emitted set', { skip }, () => {
