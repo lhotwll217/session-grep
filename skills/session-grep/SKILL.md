@@ -88,6 +88,41 @@ new JSONL-based tool means dropping one file in that folder (and adding a
 - punctuation searches like `?`
 - any request for messages before/after a specific text hit
 
+## Disclosure tiers and what each costs
+
+The modes form a ladder from cheap-and-broad to precise-and-narrow. Pick the
+cheapest tier that can answer the question; budgets are BYTES and ~4 bytes ≈ 1
+token, so the default 8k budget is roughly 2k tokens per call.
+
+| tier | call | returns | typical cost |
+|---|---|---|---|
+| 1 inventory | `--overview` | 2-line digest per session: id, span, counts, opening | ≤ 8k bytes (~2k tok) |
+| 2 shape | `--skim ID` | one session's conversational spine, head/tail kept, middle sampled | ≤ 16k bytes (~4k tok) |
+| 3 evidence | `--query` / `--any` | ranked matching messages with ±context and pointers | ≤ 8k bytes (~2k tok) |
+| 4 drill-in | `--session ID --at IDX` | the exact messages around one hit | ≤ 8k, usually far less |
+
+"Which session was X?" is tier 1→2; "what did we decide about X?" is tier 3 then
+tier 4 on the best hit. Don't open tier 2 on multiple sessions when one tier-3
+query would locate the session and the evidence at once.
+
+**Score semantics:** `--any` scores are computed against per-run statistics, so they
+are comparable within one result set but NEVER across invocations. To compare
+candidate terms, put them in one `--any` query instead of comparing scores from
+two runs.
+
+**Budget semantics and their costs:** the byte ceiling is absolute, and three
+deliberate trade-offs enforce it. (1) Selection is a strict rank-order prefix:
+each hit renders at a fixed size and selection stops at the first hit that does
+not fit — so raising `--max-chars` only ever ADDS hits (safe retry), at the cost
+of occasionally showing one hit fewer than aggressive squeezing could. (2) Under
+a near-floor budget the `word_hits` table is dropped before any evidence is —
+metadata is advisory and comes back on a bigger-budget re-run. (3) As a last
+resort the sole shown hit may have its context shed, text shrunk, and path
+visibly truncated (`...`); the `id`/`idx` pointer always stays valid — drill in
+with `--session ID --at IDX`, don't parse truncated paths. These degradations
+only engage near the 500-byte floor; at the default budgets none of them fire —
+prefer raising the budget over running at the floor.
+
 ## Retrieval principle
 
 When no stronger filtering criteria is given, treat **recency as the default heuristic for
@@ -150,7 +185,8 @@ Common flags:
 - `--exclude-session ID_PREFIX` exclude a stable session ID (repeatable); unlike `--exclude-re`, this follows canonical IDs rather than filename layout
 - `--exclude-re REGEX` exclude any session file whose path matches this JavaScript regex (repeatable) — applies to every mode (search, `--overview`, `--skim`, `--session/--at`), so wrappers can enforce a path blacklist
 - `--list-roots` print the configured source/root map and whether each root exists
-- `--max-chars N` hard rendered-output budget, default 8000 — headers and sampling markers count toward the aperture
+- `--max-chars N` output budget in BYTES (≈ chars for ASCII), default 8000 — a hard ceiling on rendered output; every line (headers and sampling markers included) is charged, and excess hits are omitted with a notice, never dumped
+- `--max-tokens N` the same budget denominated in tokens (4 bytes ≈ 1 token)
 - `--include-tools` also match inside tool_result blocks (excluded by default: they are file/command echoes, ~45% of bytes, and mostly restate the conversation)
 - `--case-sensitive` exact case match, useful for all-caps searches
 - `--json` machine-readable output (compact, same truncation and budget as text)
