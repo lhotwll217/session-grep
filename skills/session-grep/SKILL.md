@@ -101,6 +101,19 @@ are comparable within one result set but NEVER across invocations. To compare
 candidate terms, put them in one `--any` query instead of comparing scores from
 two runs.
 
+**Budget semantics and their costs:** the byte ceiling is absolute, and three
+deliberate trade-offs enforce it. (1) Selection is a strict rank-order prefix:
+each hit renders at a fixed size and selection stops at the first hit that does
+not fit — so raising `--max-chars` only ever ADDS hits (safe retry), at the cost
+of occasionally showing one hit fewer than aggressive squeezing could. (2) Under
+a near-floor budget the `word_hits` table is dropped before any evidence is —
+metadata is advisory and comes back on a bigger-budget re-run. (3) As a last
+resort the sole shown hit may have its context shed, text shrunk, and path
+visibly truncated (`...`); the `id`/`idx` pointer always stays valid — drill in
+with `--session ID --at IDX`, don't parse truncated paths. These degradations
+only engage near the 500-byte floor; at the default budgets none of them fire —
+prefer raising the budget over running at the floor.
+
 ## Retrieval principle
 
 When no stronger filtering criteria is given, treat **recency as the default heuristic for
