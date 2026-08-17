@@ -24,6 +24,7 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--root') opts.roots.push(args[++i]);
   else if (a === '--exclude-re') opts.excludeRe.push(args[++i]);
   else if (a === '--max-chars') { opts.maxChars = Number(args[++i]); opts.maxCharsSet = true; }
+  else if (a === '--max-tokens') { opts.maxChars = Number(args[++i]) * 4; opts.maxCharsSet = true; }
   else if (a === '--overview') opts.overview = true;
   else if (a === '--skim') opts.skim = args[++i];
   else if (a === '--session') opts.session = args[++i];
@@ -67,7 +68,7 @@ if (opts.selfTest) {
 if (opts.at != null && !opts.session) usage(1, '--at requires --session ID_PREFIX');
 if (!opts.query && !opts.overview && !opts.skim && !opts.listRoots && !(opts.session && opts.at != null)) usage(1, 'Missing --query (or use --overview / --skim ID / --session ID --at INDEX)');
 if (!Number.isFinite(opts.limit) || opts.limit < 1) usage(1, '--limit must be >= 1');
-if (!Number.isFinite(opts.maxChars) || opts.maxChars < 500) usage(1, '--max-chars must be >= 500');
+if (!Number.isFinite(opts.maxChars) || opts.maxChars < 500) usage(1, '--max-chars must be >= 500 (--max-tokens >= 125)');
 if (!Number.isFinite(opts.before) || opts.before < 0) usage(1, '--before must be >= 0');
 if (!Number.isFinite(opts.after) || opts.after < 0) usage(1, '--after must be >= 0');
 if (!['all', 'user', 'assistant'].includes(opts.role)) usage(1, '--role must be all, user, or assistant');
@@ -139,6 +140,13 @@ if (opts.listRoots) {
 }
 if (!roots.length) usage(1, 'No session roots found to search — edit DEFAULT_SOURCES / set SESSION_GREP_SOURCES_FILE (see SKILL.md "Onboarding") or pass --root DIR');
 
+// The output budget is denominated in BYTES (≈ 4 bytes per token): CJK, emoji, and
+// code cost what they actually cost the caller's context, and every rendered line —
+// header, word_hits, hint, omission notices — is charged, so output never exceeds it.
+function bytes(s) {
+  return Buffer.byteLength(s);
+}
+
 // Browse modes answer "which session?" and "what happened in it?" in one call each —
 // whole-thread questions shouldn't cost 20 grep probes. A skim substitutes for many
 // probe calls, so it gets a roomier default budget.
@@ -163,13 +171,14 @@ if (opts.session && opts.at != null) {
   const a = opts.afterSet ? opts.after : 5;
   const from = Math.max(0, opts.at - b);
   const to = Math.min(messages.length - 1, opts.at + a);
-  console.log(`window id=${sessionId(file)} messages ${from}..${to} of ${messages.length} path=${file}`);
-  let size = 0;
+  const head = `window id=${sessionId(file)} messages ${from}..${to} of ${messages.length} path=${file}`;
+  console.log(head);
+  let size = bytes(head) + 1 + 64; // 64: reserve for the truncation notice
   for (let i = from; i <= to; i++) {
     const m = messages[i];
     const line = `[${i}]${i === opts.at ? '*' : ' '} ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${truncate(m.text, i === opts.at ? 600 : 300)}`;
-    size += line.length;
-    if (size > opts.maxChars) { console.log(`... window truncated by --max-chars at [${i}]`); break; }
+    if (size + bytes(line) + 1 > opts.maxChars) { console.log(`... window truncated by --max-chars at [${i}]`); break; }
+    size += bytes(line) + 1;
     console.log(line);
   }
   process.exit(0);
@@ -204,7 +213,8 @@ const matches = [];
 const q = opts.caseSensitive ? opts.query : opts.query.toLowerCase();
 // --any rarity stats: document frequency per word across scanned messages. Rare words
 // are the signal; the ranking weights them (IDF) and the output reports the counts so
-// the caller learns which of its words are low-signal.
+// the caller learns which of its words are low-signal. Counted AFTER the --role/--since
+// filters so word_hits describes the population the caller actually sees.
 const wordDf = anyWords ? Object.fromEntries(anyWords.map((w) => [w, 0])) : null;
 let messagesScanned = 0;
 
@@ -214,8 +224,16 @@ for (const file of files) {
   let raw;
   try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
   const messages = parseMessages(raw, source);
+  let fileMtime = null; // timestamp fallback, one stat per file not per message
+  const mtime = () => (fileMtime ??= fs.statSync(file).mtimeMs);
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
+    if (opts.role !== 'all' && msg.role !== opts.role) continue;
+    let time = null;
+    if (sinceTime != null) {
+      time = timeOf(msg.timestamp) ?? timeOf(messages[0]?.timestamp) ?? mtime();
+      if (time < sinceTime) continue;
+    }
     messagesScanned++;
     const haystack = opts.caseSensitive ? msg.text : msg.text.toLowerCase();
     let hitWords = null;
@@ -223,11 +241,8 @@ for (const file of files) {
       hitWords = anyWords.filter((w) => haystack.includes(w));
       for (const w of hitWords) wordDf[w]++;
       if (!hitWords.length) continue;
-    }
-    if (opts.role !== 'all' && msg.role !== opts.role) continue;
-    if (!anyWords && (opts.regex ? !queryRegex.test(msg.text) : !haystack.includes(q))) continue;
-    const time = timeOf(msg.timestamp) ?? timeOf(messages[0]?.timestamp) ?? fs.statSync(file).mtimeMs;
-    if (sinceTime != null && time < sinceTime) continue;
+    } else if (opts.regex ? !queryRegex.test(msg.text) : !haystack.includes(q)) continue;
+    time ??= timeOf(msg.timestamp) ?? timeOf(messages[0]?.timestamp) ?? mtime();
     matches.push({
       source,
       id: sessionId(file),
@@ -269,24 +284,25 @@ const wordStats = anyWords
   ? anyWords.map((w) => `${w}=${wordDf[w]}`).join(' ')
   : null;
 
-// Output is budgeted (--max-chars, default 8k): a bad query can't flood the caller's
-// context. Hits are selected in rank order until the budget runs out (an oversized
-// FIRST hit is trimmed to fit rather than blowing the budget), and the header reports
-// the true emitted count.
-const OMIT = (n) => `... ${n} more matching messages omitted by the ${opts.maxChars}-char output budget — narrow with --role/--since${opts.any ? '/rarer words' : ''}, or raise --max-chars`;
+// Output is budgeted (--max-chars bytes, default 8k): a bad query can't flood the
+// caller's context. The REAL header, word_hits, hint, and omission lines are charged
+// against the budget (not a fixed allowance), then hits are selected in rank order.
+// Evidence outranks metadata: before returning zero hits, the word_hits table is
+// dropped and the top match hard-truncated — shown=0 with matches>0 must not happen
+// because a df table spent the whole aperture.
+const OMIT = (n) => `... ${n} more matching messages omitted by the ${opts.maxChars}-byte output budget — narrow with --role/--since${opts.any ? '/rarer words' : ''}, or raise --max-chars`;
+const queryEcho = truncate(opts.query, 120); // a 2k-char query must not eat the budget echoing itself
 
-const HEADER_ALLOWANCE = 300;
-function selectWithinBudget(renderLen, trimContext) {
+function selectWithinBudget(renderLen, trimContext, budget) {
   const emitted = [];
-  let size = HEADER_ALLOWANCE;
+  let size = 0;
   for (const m of limited) {
     let entry = m;
     let len = renderLen(entry);
-    if (size + len > opts.maxChars) {
-      if (emitted.length) break;
-      entry = trimContext(entry); // always emit at least the match itself, contextless
+    if (size + len > budget) {
+      entry = trimContext(entry); // shed context before dropping a hit (fills tail space too)
       len = renderLen(entry);
-      if (size + len > opts.maxChars) break;
+      if (size + len > budget) break;
     }
     size += len;
     emitted.push(entry);
@@ -294,15 +310,32 @@ function selectWithinBudget(renderLen, trimContext) {
   return emitted;
 }
 
+// Shared last-resort pass: no context, match text shrunk until the entry fits.
+function forceOneHit(renderLen, budget) {
+  const m = limited[0];
+  for (let room = 300; room >= 40; room = Math.floor(room / 2)) {
+    const cand = { ...m, before: [], after: [], match: { ...m.match, text: truncate(m.match.text, room) } };
+    if (renderLen(cand) <= budget) return [cand];
+  }
+  return [];
+}
+
 if (opts.json) {
   const slim = (msg) => ({ role: msg.role, text: truncate(msg.text, 300), timestamp: msg.timestamp });
   const toEntry = (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, before: m.before.map(slim), match: slim(m.match), after: m.after.map(slim) });
-  const emitted = selectWithinBudget(
-    (m) => JSON.stringify(toEntry(m)).length,
-    (m) => ({ ...m, before: [], after: [] }),
-  ).map(toEntry);
-  const omitted = limited.length - emitted.length;
-  console.log(JSON.stringify({ query: opts.query, regex: opts.regex, any: !!opts.any, ...(anyWords ? { wordHits: wordDf, messagesScanned } : {}), rawFilesWithHits: files.length, totalMatches: matches.length, shown: emitted.length, ...(omitted ? { omittedByBudget: omitted, note: OMIT(omitted) } : {}), ...(hint ? { hint } : {}), matches: emitted }));
+  const entryLen = (m) => bytes(JSON.stringify(toEntry(m))) + 1;
+  let withStats = !!anyWords;
+  // Worst-case envelope (max shown/omitted digits, omission note included) so the
+  // real output can only come in at or under the charged size.
+  const envelope = (matchesArr, shown, omitted) => ({ query: queryEcho, regex: opts.regex, any: !!opts.any, ...(withStats ? { wordHits: wordDf, messagesScanned } : {}), rawFilesWithHits: files.length, totalMatches: matches.length, shown, ...(omitted ? { omittedByBudget: omitted, note: OMIT(omitted) } : {}), ...(hint ? { hint } : {}), matches: matchesArr });
+  const room = () => opts.maxChars - bytes(JSON.stringify(envelope([], limited.length, limited.length)));
+  let emitted = selectWithinBudget(entryLen, (m) => ({ ...m, before: [], after: [] }), room());
+  if (!emitted.length && limited.length && withStats) {
+    withStats = false;
+    emitted = selectWithinBudget(entryLen, (m) => ({ ...m, before: [], after: [] }), room());
+  }
+  if (!emitted.length && limited.length) emitted = forceOneHit(entryLen, room());
+  console.log(JSON.stringify(envelope(emitted.map(toEntry), emitted.length, limited.length - emitted.length)));
 } else {
   const renderLines = (m) => [
     `${m.source} id=${m.id} idx=${m.index} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] score=${m.score}` : ''}`,
@@ -311,14 +344,25 @@ if (opts.json) {
     `  MATCH ${m.match.role}: ${truncate(m.match.text, 300)}`,
     ...m.after.map((a) => `  after  ${a.role}: ${truncate(a.text, 180)}`),
   ];
-  const emitted = selectWithinBudget(
-    (m) => renderLines(m).reduce((t, l) => t + l.length + 1, 6),
-    (m) => ({ ...m, before: [], after: [] }),
-  );
+  const entryLen = (m) => renderLines(m).reduce((t, l) => t + bytes(l) + 1, 6);
+  const header = (shown) => `query=${JSON.stringify(queryEcho)}${opts.regex ? ' regex=true' : ''}${opts.any ? ` any=true` : ''} raw_files_with_hits=${files.length} total_message_matches=${matches.length} shown=${shown} sort=${opts.sort}${opts.since ? ` since=${opts.since}` : ''}${opts.caseSensitive ? ' case_sensitive=true' : ''}`;
+  let wordStatsLine = wordStats ? `word_hits: ${truncate(wordStats, 300)} (of ${messagesScanned} messages searched after filters; high-count words are low-signal — prefer the rare ones)` : null;
+  const hintLine = hint ? `hint: ${hint}` : null;
+  const room = () => opts.maxChars
+    - bytes(header(limited.length)) - 1
+    - (wordStatsLine ? bytes(wordStatsLine) + 1 : 0)
+    - (hintLine ? bytes(hintLine) + 1 : 0)
+    - (limited.length ? bytes(OMIT(limited.length)) + 2 : 0);
+  let emitted = selectWithinBudget(entryLen, (m) => ({ ...m, before: [], after: [] }), room());
+  if (!emitted.length && limited.length && wordStatsLine) {
+    wordStatsLine = null;
+    emitted = selectWithinBudget(entryLen, (m) => ({ ...m, before: [], after: [] }), room());
+  }
+  if (!emitted.length && limited.length) emitted = forceOneHit(entryLen, room());
   const omitted = limited.length - emitted.length;
-  console.log(`query=${JSON.stringify(opts.query)}${opts.regex ? ' regex=true' : ''}${opts.any ? ` any=true` : ''} raw_files_with_hits=${files.length} total_message_matches=${matches.length} shown=${emitted.length} sort=${opts.sort}${opts.since ? ` since=${opts.since}` : ''}${opts.caseSensitive ? ' case_sensitive=true' : ''}`);
-  if (wordStats) console.log(`word_hits: ${wordStats} (of ${messagesScanned} messages in matched files; high-count words are low-signal — prefer the rare ones)`);
-  if (hint) console.log(`hint: ${hint}`);
+  console.log(header(emitted.length));
+  if (wordStatsLine) console.log(wordStatsLine);
+  if (hintLine) console.log(hintLine);
   emitted.forEach((m, idx) => {
     const [head, ...rest] = renderLines(m);
     console.log(`\n[${idx + 1}] ${head}`);
@@ -379,39 +423,56 @@ function browse() {
     if (!file) usage(1, `No session file matching id prefix "${opts.skim}" under: ${roots.join(', ')}`);
     const messages = parseMessages(fs.readFileSync(file, 'utf8'), sourceOf(file));
     const lines = messages.map((m, i) => `[${i}] ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${truncate(m.text, 200)}`);
-    console.log(`skim id=${sessionId(file)} messages=${messages.length} path=${file}`);
-    const budget = opts.maxChars - 200;
-    const total = lines.reduce((t, l) => t + l.length + 1, 0);
-    if (total <= budget) {
+    const head0 = `skim id=${sessionId(file)} messages=${messages.length} path=${file}`;
+    console.log(head0);
+    const available = opts.maxChars - bytes(head0) - 2; // hard byte ceiling for everything below the header
+    const sizeOf = (ls) => ls.reduce((t, l) => t + bytes(l) + 1, 0);
+    if (sizeOf(lines) <= available) {
       for (const l of lines) console.log(l);
       return;
     }
-    const avg = total / lines.length;
+    const avg = sizeOf(lines) / lines.length;
     // Budget is authoritative — no minimum floor (codex review: keep>=20 blew small
     // budgets). Head/tail sizes scale down with the budget; middle picks are CENTERED
     // in their strides so low sample counts don't cluster at the start of the middle.
-    const keep = Math.max(3, Math.floor(budget / avg));
+    // The average only ESTIMATES the sample count; the assembled output (sampled-out
+    // notices included) is then measured in bytes and middle picks dropped until it
+    // fits, so head and tail always survive and the ceiling always holds.
+    const keep = Math.max(3, Math.floor(available / avg));
     const edge = Math.min(10, Math.floor(keep / 3), Math.floor(lines.length / 2));
     const head = Math.max(1, edge);
     const tail = Math.min(Math.max(1, edge), lines.length - head);
     const middleKeep = Math.max(0, keep - head - tail);
     const middle = lines.length - head - tail;
     const stride = middleKeep > 0 ? middle / middleKeep : Infinity;
-    const chosen = new Set();
-    for (let i = 0; i < head; i++) chosen.add(i);
-    for (let i = 0; i < middleKeep; i++) chosen.add(head + Math.min(middle - 1, Math.floor((i + 0.5) * stride)));
-    for (let i = lines.length - tail; i < lines.length; i++) chosen.add(i);
-    let skipped = 0;
-    for (let i = 0; i < lines.length; i++) {
-      if (chosen.has(i)) {
-        if (skipped) console.log(`  ... ${skipped} messages sampled out (drill in with --query on anything above/below) ...`);
-        skipped = 0;
-        console.log(lines[i]);
-      } else {
-        skipped++;
+    let picks = [];
+    for (let i = 0; i < middleKeep; i++) picks.push(head + Math.min(middle - 1, Math.floor((i + 0.5) * stride)));
+    const assemble = (midPicks) => {
+      const chosen = new Set(midPicks);
+      for (let i = 0; i < head; i++) chosen.add(i);
+      for (let i = lines.length - tail; i < lines.length; i++) chosen.add(i);
+      const out = [];
+      let skipped = 0;
+      for (let i = 0; i < lines.length; i++) {
+        if (chosen.has(i)) {
+          if (skipped) out.push(`  ... ${skipped} messages sampled out (drill in with --query on anything above/below) ...`);
+          skipped = 0;
+          out.push(lines[i]);
+        } else {
+          skipped++;
+        }
       }
+      if (skipped) out.push(`  ... ${skipped} messages sampled out ...`);
+      return out;
+    };
+    let out = assemble(picks);
+    while (sizeOf(out) > available && picks.length) {
+      picks = picks.slice(0, -1);
+      out = assemble(picks);
     }
-    if (skipped) console.log(`  ... ${skipped} messages sampled out ...`);
+    // Degenerate floor (tiny budget, long lines): opening message + omission notice.
+    if (sizeOf(out) > available) out = [lines[0], `  ... ${lines.length - 1} more messages omitted by --max-chars ...`];
+    for (const l of out) console.log(l);
     return;
   }
 
@@ -441,22 +502,30 @@ function browse() {
     });
   }
   digests.sort((a, b) => b.lastTime - a.lastTime);
-  console.log(`sessions=${digests.length} (newest first) — drill in with --skim ID or --query`);
-  let size = 0;
+  const head0 = `sessions=${digests.length} (newest first) — drill in with --skim ID or --query`;
+  console.log(head0);
+  let size = bytes(head0) + 1 + 64; // 64: reserve for the omission notice
   for (const d of digests) {
     const block = `\nid=${d.id} source=${d.source} ${d.from} -> ${d.to} msgs=${d.user}u/${d.assistant}a size=${d.mb}MB\n  opening: ${d.opening}`;
-    if (size + block.length > opts.maxChars) {
+    if (size + bytes(block) + 1 > opts.maxChars) {
       console.log(`\n... remaining sessions omitted by --max-chars budget`);
       break;
     }
-    size += block.length;
+    size += bytes(block) + 1;
     console.log(block);
   }
 }
 
+// Byte-budgeted truncation (n is bytes, ≈ chars for ASCII). Never splits a surrogate
+// pair, so CJK/emoji previews stay valid text and cost what they claim.
 function truncate(s, n) {
   const oneLine = s.replace(/\s+/g, ' ').trim();
-  return oneLine.length > n ? `${oneLine.slice(0, n)}...` : oneLine;
+  if (Buffer.byteLength(oneLine) <= n) return oneLine;
+  let end = Math.min(oneLine.length, n);
+  while (end > 0 && Buffer.byteLength(oneLine.slice(0, end)) > n - 3) end--;
+  let cut = oneLine.slice(0, end);
+  if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+  return `${cut}...`;
 }
 
 function timeOf(value) {
@@ -484,7 +553,7 @@ function compileRegex(pattern, caseSensitive) {
 
 function usage(code, msg) {
   if (msg) console.error(msg);
-  console.error('Usage: session-grep.mjs --query TEXT [--any] [--regex] [--limit N] [--before N] [--after N] [--role user|assistant|all] [--source claude|codex|pi|all] [--since today|Nd|YYYY-MM-DD] [--sort newest|oldest|file] [--root DIR ...] [--exclude-re REGEX ...] [--max-chars N] [--include-tools] [--case-sensitive] [--json] | --overview | --skim ID | --session ID --at INDEX | --list-roots | --self-test');
+  console.error('Usage: session-grep.mjs --query TEXT [--any] [--regex] [--limit N] [--before N] [--after N] [--role user|assistant|all] [--source claude|codex|pi|all] [--since today|Nd|YYYY-MM-DD] [--sort newest|oldest|file] [--root DIR ...] [--exclude-re REGEX ...] [--max-chars BYTES | --max-tokens N] [--include-tools] [--case-sensitive] [--json] | --overview | --skim ID | --session ID --at INDEX | --list-roots | --self-test');
   process.exit(code);
 }
 
@@ -509,6 +578,10 @@ async function selfTest() {
   for (let i = 0; i < 12; i++) a += line(i % 2 ? 'assistant' : 'user', text(`more sidebar discussion segment ${i} winding down`), `2026-06-01T11:${String(i).padStart(2, '0')}:00Z`);
   a += line('user', text('final closing message of session alpha'), '2026-06-01T12:00:00Z');
   fs.writeFileSync(path.join(proj, 'aaaa1111.jsonl'), a);
+  // Session CJK: Japanese text — exercises byte (not UTF-16) budget accounting.
+  let cj = '';
+  for (let i = 0; i < 20; i++) cj += line(i % 2 ? 'assistant' : 'user', text(`現地時間のバグについての議論 その${i} — タイムゾーン変換が失敗する`), `2026-06-03T10:${String(i).padStart(2, '0')}:00Z`);
+  fs.writeFileSync(path.join(proj, 'cjkcjk11.jsonl'), cj);
   // Session B: small, distinct.
   fs.writeFileSync(path.join(proj, 'bbbb2222.jsonl'),
     line('user', text('opening question about quixotic deployment'), '2026-06-05T09:00:00Z') +
@@ -567,12 +640,34 @@ async function selfTest() {
     check('rare word ranks first', any.matches[0].matchedWords.includes('flumoxide'));
     check('word df counted', any.wordHits.sidebar > any.wordHits.flumoxide);
 
-    // budget enforcement + omission notice
+    // budget enforcement: the budget is a hard byte ceiling, all lines charged
     const tiny = run(['--query', 'sidebar', '--limit', '30', '--max-chars', '600']);
-    check('budget respected (<=600+slack)', tiny.length <= 900);
-    check('omission notice present', tiny.includes('omitted by the 600-char output budget'));
+    check('budget is a hard byte ceiling', Buffer.byteLength(tiny) <= 600);
+    check('omission notice present', tiny.includes('omitted by the 600-byte output budget'));
     const tinyShown = Number(tiny.match(/shown=(\d+)/)[1]);
     check('header shown = emitted blocks', (tiny.match(/\n\[\d+\]/g) || []).length === tinyShown);
+    const tokens = run(['--query', 'sidebar', '--limit', '30', '--max-tokens', '200']);
+    check('--max-tokens = 4 bytes per token', Buffer.byteLength(tokens) <= 800);
+    const tinyJson = run(['--query', 'sidebar', '--limit', '30', '--max-chars', '600', '--json']);
+    check('json budget is a hard byte ceiling', Buffer.byteLength(tinyJson) <= 600);
+    check('json still parses under budget pressure', JSON.parse(tinyJson).shown >= 1);
+    // evidence outranks metadata: common --any words + small budget must still show a hit
+    const crowded = run(['--query', 'sidebar discussion chatter project segment', '--any', '--limit', '30', '--max-chars', '800']);
+    check('crowded budget still shows evidence', Number(crowded.match(/shown=(\d+)/)[1]) >= 1);
+    check('crowded budget stays under ceiling', Buffer.byteLength(crowded) <= 800);
+    // a huge query must not blow the budget echoing itself in the header
+    const longQ = run(['--query', 'z'.repeat(1500), '--max-chars', '500']);
+    check('long query echo truncated', Buffer.byteLength(longQ) <= 500);
+    // non-ASCII: bytes, not UTF-16 units — CJK output must respect the same ceiling
+    const cjk = run(['--query', '現地時間', '--limit', '30', '--max-chars', '600']);
+    check('cjk query finds hits', Number(cjk.match(/shown=(\d+)/)[1]) >= 1);
+    check('cjk budget is a hard byte ceiling', Buffer.byteLength(cjk) <= 600);
+    const cjkSkim = run(['--skim', 'cjkcjk11', '--max-chars', '900']);
+    check('cjk skim within byte budget', Buffer.byteLength(cjkSkim) <= 900);
+    // word_hits describes the population after --role/--since filters
+    const dfAll = JSON.parse(run(['--query', 'sidebar flumoxide', '--any', '--json']));
+    const dfUser = JSON.parse(run(['--query', 'sidebar flumoxide', '--any', '--role', 'user', '--json']));
+    check('word df counted after filters', dfUser.wordHits.sidebar < dfAll.wordHits.sidebar);
 
     // zero-hit hint
     const miss = run(['--query', 'totally absent phrase here']);
@@ -590,7 +685,7 @@ async function selfTest() {
     const ovRecent = run(['--overview', '--since', '2026-06-06']);
     check('overview honors --since', ovRecent.includes('rollout-cccc') && !ovRecent.includes('aaaa1111') && !ovRecent.includes('bbbb2222'));
     const spine = run(['--skim', 'aaaa1111', '--max-chars', '900']);
-    check('skim within budget (+slack)', spine.length <= 1400);
+    check('skim within byte budget', Buffer.byteLength(spine) <= 900);
     check('skim keeps head', spine.includes('number 0'));
     check('skim keeps tail', spine.includes('session alpha'));
 
