@@ -66,6 +66,7 @@ if (opts.selfTest) {
   process.exit(await selfTest());
 }
 if (opts.at != null && !opts.session) usage(1, '--at requires --session ID_PREFIX');
+if (opts.session && opts.at == null) usage(1, '--session requires --at INDEX (from a hit\'s idx= field). To browse one session use --skim ID; to scope a search to one session pass --root on its directory.');
 if (!opts.query && !opts.overview && !opts.skim && !opts.listRoots && !(opts.session && opts.at != null)) usage(1, 'Missing --query (or use --overview / --skim ID / --session ID --at INDEX)');
 if (!Number.isFinite(opts.limit) || opts.limit < 1) usage(1, '--limit must be >= 1');
 if (!Number.isFinite(opts.maxChars) || opts.maxChars < 500) usage(1, '--max-chars must be >= 500 (--max-tokens >= 125)');
@@ -171,7 +172,8 @@ if (opts.session && opts.at != null) {
   const a = opts.afterSet ? opts.after : 5;
   const from = Math.max(0, opts.at - b);
   const to = Math.min(messages.length - 1, opts.at + a);
-  const head = `window id=${sessionId(file)} messages ${from}..${to} of ${messages.length} path=${file}`;
+  // The header is budgeted too: a deep path must not bust a small budget on line one.
+  const head = truncate(`window id=${sessionId(file)} messages ${from}..${to} of ${messages.length} path=${file}`, opts.maxChars - 80);
   console.log(head);
   let size = bytes(head) + 1 + 64; // 64: reserve for the truncation notice
   for (let i = from; i <= to; i++) {
@@ -208,7 +210,9 @@ if (rg.status === 2 && opts.regex) {
 } else {
   files = rg.status === 0 ? rg.stdout.trim().split('\n').filter(Boolean) : [];
 }
-files = files.filter((f) => !isExcluded(f));
+// rg enumerates files in nondeterministic (parallel-walk) order; sort so identical
+// invocations rank ties identically.
+files = files.filter((f) => !isExcluded(f)).sort();
 const matches = [];
 const q = opts.caseSensitive ? opts.query : opts.query.toLowerCase();
 // --any rarity stats: document frequency per word across scanned messages. Rare words
@@ -259,13 +263,15 @@ for (const file of files) {
 }
 
 // With --any, rank by summed word rarity (IDF): a hit on one rare identifier beats a
-// hit on three ubiquitous words. Recency breaks ties.
+// hit on three ubiquitous words. Recency breaks ties, then id/index so equal-time
+// hits from different files order deterministically across runs.
+const stable = (a, b) => a.id.localeCompare(b.id) || a.index - b.index;
 if (anyWords) {
   const idf = (w) => Math.log((messagesScanned + 1) / (wordDf[w] + 1));
   for (const m of matches) m.score = round3(m.matchedWords.reduce((t, w) => t + idf(w), 0));
-  matches.sort((a, b) => b.score - a.score || (opts.sort === 'oldest' ? a.time - b.time : b.time - a.time));
-} else if (opts.sort === 'newest') matches.sort((a, b) => b.time - a.time);
-else if (opts.sort === 'oldest') matches.sort((a, b) => a.time - b.time);
+  matches.sort((a, b) => b.score - a.score || (opts.sort === 'oldest' ? a.time - b.time : b.time - a.time) || stable(a, b));
+} else if (opts.sort === 'newest') matches.sort((a, b) => b.time - a.time || stable(a, b));
+else if (opts.sort === 'oldest') matches.sort((a, b) => a.time - b.time || stable(a, b));
 const limited = matches.slice(0, opts.limit);
 
 // Zero hits should steer the next query, not dead-end the agent: multi-word literal
@@ -287,35 +293,42 @@ const wordStats = anyWords
 // Output is budgeted (--max-chars bytes, default 8k): a bad query can't flood the
 // caller's context. The REAL header, word_hits, hint, and omission lines are charged
 // against the budget (not a fixed allowance), then hits are selected in rank order.
-// Evidence outranks metadata: before returning zero hits, the word_hits table is
-// dropped and the top match hard-truncated — shown=0 with matches>0 must not happen
-// because a df table spent the whole aperture.
+// Two invariants:
+//  - Monotone: entries render at a fixed size, so selection is a strict rank-order
+//    prefix — raising the budget can only extend the emitted set, never reshuffle it.
+//  - Evidence outranks metadata: whenever the fixed lines can't fit (zero-hit df
+//    tables included) the word_hits table is dropped, and before returning shown=0
+//    with matches present the top hit is hard-shrunk (text first, path last).
 const OMIT = (n) => `... ${n} more matching messages omitted by the ${opts.maxChars}-byte output budget — narrow with --role/--since${opts.any ? '/rarer words' : ''}, or raise --max-chars`;
 const queryEcho = truncate(opts.query, 120); // a 2k-char query must not eat the budget echoing itself
 
-function selectWithinBudget(renderLen, trimContext, budget) {
+function selectWithinBudget(renderLen, budget) {
   const emitted = [];
   let size = 0;
   for (const m of limited) {
-    let entry = m;
-    let len = renderLen(entry);
-    if (size + len > budget) {
-      entry = trimContext(entry); // shed context before dropping a hit (fills tail space too)
-      len = renderLen(entry);
-      if (size + len > budget) break;
-    }
+    const len = renderLen(m);
+    if (size + len > budget) break;
     size += len;
-    emitted.push(entry);
+    emitted.push(m);
   }
   return emitted;
 }
 
-// Shared last-resort pass: no context, match text shrunk until the entry fits.
+// Last resort when not even the top hit fits whole: shed context, then shrink the
+// match text, then squeeze the path (the id/idx pointer still resolves it).
 function forceOneHit(renderLen, budget) {
   const m = limited[0];
-  for (let room = 300; room >= 40; room = Math.floor(room / 2)) {
-    const cand = { ...m, before: [], after: [], match: { ...m.match, text: truncate(m.match.text, room) } };
-    if (renderLen(cand) <= budget) return [cand];
+  for (const pathMax of [Infinity, 80]) {
+    for (const room of [300, 150, 75, 40]) {
+      const cand = {
+        ...m,
+        before: [],
+        after: [],
+        path: pathMax === Infinity ? m.path : truncate(m.path, pathMax),
+        match: { ...m.match, text: truncate(m.match.text, room) },
+      };
+      if (renderLen(cand) <= budget) return [cand];
+    }
   }
   return [];
 }
@@ -325,16 +338,24 @@ if (opts.json) {
   const toEntry = (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, before: m.before.map(slim), match: slim(m.match), after: m.after.map(slim) });
   const entryLen = (m) => bytes(JSON.stringify(toEntry(m))) + 1;
   let withStats = !!anyWords;
-  // Worst-case envelope (max shown/omitted digits, omission note included) so the
-  // real output can only come in at or under the charged size.
+  // Worst-case envelope (max shown/omitted digits, omission note included, trailing
+  // newline) so the real output can only come in at or under the charged size.
   const envelope = (matchesArr, shown, omitted) => ({ query: queryEcho, regex: opts.regex, any: !!opts.any, ...(withStats ? { wordHits: wordDf, messagesScanned } : {}), rawFilesWithHits: files.length, totalMatches: matches.length, shown, ...(omitted ? { omittedByBudget: omitted, note: OMIT(omitted) } : {}), ...(hint ? { hint } : {}), matches: matchesArr });
-  const room = () => opts.maxChars - bytes(JSON.stringify(envelope([], limited.length, limited.length)));
-  let emitted = selectWithinBudget(entryLen, (m) => ({ ...m, before: [], after: [] }), room());
-  if (!emitted.length && limited.length && withStats) {
-    withStats = false;
-    emitted = selectWithinBudget(entryLen, (m) => ({ ...m, before: [], after: [] }), room());
+  const room = (withOmit) => opts.maxChars - bytes(JSON.stringify(envelope([], limited.length, withOmit ? limited.length : 0))) - 1;
+  // A df table that can't fit is dropped even with zero hits — the ceiling binds always.
+  if (withStats && room(false) < 0) withStats = false;
+  // Two-phase: the omission note only prints when hits are omitted, so charge its
+  // reserve only when selection actually falls short of the full list.
+  let emitted = selectWithinBudget(entryLen, room(false));
+  if (emitted.length < limited.length) {
+    emitted = selectWithinBudget(entryLen, room(true));
+    if (!emitted.length && withStats) {
+      withStats = false;
+      emitted = selectWithinBudget(entryLen, room(true));
+    }
+    // Emitting the sole hit means nothing is omitted, so no note reserve applies then.
+    if (!emitted.length) emitted = forceOneHit(entryLen, room(limited.length > 1));
   }
-  if (!emitted.length && limited.length) emitted = forceOneHit(entryLen, room());
   console.log(JSON.stringify(envelope(emitted.map(toEntry), emitted.length, limited.length - emitted.length)));
 } else {
   const renderLines = (m) => [
@@ -344,21 +365,31 @@ if (opts.json) {
     `  MATCH ${m.match.role}: ${truncate(m.match.text, 300)}`,
     ...m.after.map((a) => `  after  ${a.role}: ${truncate(a.text, 180)}`),
   ];
-  const entryLen = (m) => renderLines(m).reduce((t, l) => t + bytes(l) + 1, 6);
+  // "\n[N] " between entries grows with the hit number — charge the widest it can get.
+  const idxOverhead = String(Math.min(limited.length, opts.limit)).length + 4;
+  const entryLen = (m) => renderLines(m).reduce((t, l) => t + bytes(l) + 1, idxOverhead);
   const header = (shown) => `query=${JSON.stringify(queryEcho)}${opts.regex ? ' regex=true' : ''}${opts.any ? ` any=true` : ''} raw_files_with_hits=${files.length} total_message_matches=${matches.length} shown=${shown} sort=${opts.sort}${opts.since ? ` since=${opts.since}` : ''}${opts.caseSensitive ? ' case_sensitive=true' : ''}`;
   let wordStatsLine = wordStats ? `word_hits: ${truncate(wordStats, 300)} (of ${messagesScanned} messages searched after filters; high-count words are low-signal — prefer the rare ones)` : null;
   const hintLine = hint ? `hint: ${hint}` : null;
-  const room = () => opts.maxChars
+  const room = (withOmit) => opts.maxChars
     - bytes(header(limited.length)) - 1
     - (wordStatsLine ? bytes(wordStatsLine) + 1 : 0)
     - (hintLine ? bytes(hintLine) + 1 : 0)
-    - (limited.length ? bytes(OMIT(limited.length)) + 2 : 0);
-  let emitted = selectWithinBudget(entryLen, (m) => ({ ...m, before: [], after: [] }), room());
-  if (!emitted.length && limited.length && wordStatsLine) {
-    wordStatsLine = null;
-    emitted = selectWithinBudget(entryLen, (m) => ({ ...m, before: [], after: [] }), room());
+    - (withOmit && limited.length ? bytes(OMIT(limited.length)) + 2 : 0);
+  // A df table that can't fit is dropped even with zero hits — the ceiling binds always.
+  if (wordStatsLine && room(false) < 0) wordStatsLine = null;
+  // Two-phase: the omission note only prints when hits are omitted, so charge its
+  // reserve only when selection actually falls short of the full list.
+  let emitted = selectWithinBudget(entryLen, room(false));
+  if (emitted.length < limited.length) {
+    emitted = selectWithinBudget(entryLen, room(true));
+    if (!emitted.length && wordStatsLine) {
+      wordStatsLine = null;
+      emitted = selectWithinBudget(entryLen, room(true));
+    }
+    // Emitting the sole hit means nothing is omitted, so no note reserve applies then.
+    if (!emitted.length) emitted = forceOneHit(entryLen, room(limited.length > 1));
   }
-  if (!emitted.length && limited.length) emitted = forceOneHit(entryLen, room());
   const omitted = limited.length - emitted.length;
   console.log(header(emitted.length));
   if (wordStatsLine) console.log(wordStatsLine);
@@ -408,7 +439,7 @@ function allSessionFiles() {
       if (p.endsWith('.jsonl') && !isExcluded(p) && fs.statSync(p).isFile()) out.push(p);
     }
   }
-  return out;
+  return out.sort(); // readdir order varies; keep browse/window resolution deterministic
 }
 
 // --overview: one compact digest per session (id, dates, message counts, opening user
@@ -423,7 +454,8 @@ function browse() {
     if (!file) usage(1, `No session file matching id prefix "${opts.skim}" under: ${roots.join(', ')}`);
     const messages = parseMessages(fs.readFileSync(file, 'utf8'), sourceOf(file));
     const lines = messages.map((m, i) => `[${i}] ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${truncate(m.text, 200)}`);
-    const head0 = `skim id=${sessionId(file)} messages=${messages.length} path=${file}`;
+    // The header is budgeted too: a deep path must not bust a small budget on line one.
+    const head0 = truncate(`skim id=${sessionId(file)} messages=${messages.length} path=${file}`, opts.maxChars - 80);
     console.log(head0);
     const available = opts.maxChars - bytes(head0) - 2; // hard byte ceiling for everything below the header
     const sizeOf = (ls) => ls.reduce((t, l) => t + bytes(l) + 1, 0);
@@ -436,21 +468,22 @@ function browse() {
     // budgets). Head/tail sizes scale down with the budget; middle picks are CENTERED
     // in their strides so low sample counts don't cluster at the start of the middle.
     // The average only ESTIMATES the sample count; the assembled output (sampled-out
-    // notices included) is then measured in bytes and middle picks dropped until it
-    // fits, so head and tail always survive and the ceiling always holds.
+    // notices included) is then measured in bytes, and middle picks — then edge
+    // lines, down to one head and one tail — are dropped until it fits, so the
+    // ceiling always holds and head/tail survive at every budget that can hold them.
     const keep = Math.max(3, Math.floor(available / avg));
     const edge = Math.min(10, Math.floor(keep / 3), Math.floor(lines.length / 2));
-    const head = Math.max(1, edge);
-    const tail = Math.min(Math.max(1, edge), lines.length - head);
-    const middleKeep = Math.max(0, keep - head - tail);
-    const middle = lines.length - head - tail;
+    let headKeep = Math.max(1, edge);
+    let tailKeep = Math.min(Math.max(1, edge), lines.length - headKeep);
+    const middleKeep = Math.max(0, keep - headKeep - tailKeep);
+    const middle = lines.length - headKeep - tailKeep;
     const stride = middleKeep > 0 ? middle / middleKeep : Infinity;
     let picks = [];
-    for (let i = 0; i < middleKeep; i++) picks.push(head + Math.min(middle - 1, Math.floor((i + 0.5) * stride)));
-    const assemble = (midPicks) => {
-      const chosen = new Set(midPicks);
-      for (let i = 0; i < head; i++) chosen.add(i);
-      for (let i = lines.length - tail; i < lines.length; i++) chosen.add(i);
+    for (let i = 0; i < middleKeep; i++) picks.push(headKeep + Math.min(middle - 1, Math.floor((i + 0.5) * stride)));
+    const assemble = (midPicks, h, t) => {
+      const chosen = new Set(midPicks.filter((i) => i >= h && i < lines.length - t));
+      for (let i = 0; i < h; i++) chosen.add(i);
+      for (let i = lines.length - t; i < lines.length; i++) chosen.add(i);
       const out = [];
       let skipped = 0;
       for (let i = 0; i < lines.length; i++) {
@@ -465,13 +498,20 @@ function browse() {
       if (skipped) out.push(`  ... ${skipped} messages sampled out ...`);
       return out;
     };
-    let out = assemble(picks);
-    while (sizeOf(out) > available && picks.length) {
-      picks = picks.slice(0, -1);
-      out = assemble(picks);
+    let out = assemble(picks, headKeep, tailKeep);
+    while (sizeOf(out) > available && (picks.length || headKeep + tailKeep > 2)) {
+      if (picks.length) picks = picks.slice(0, -1);
+      else if (headKeep >= tailKeep && headKeep > 1) headKeep--;
+      else tailKeep--;
+      out = assemble(picks, headKeep, tailKeep);
     }
-    // Degenerate floor (tiny budget, long lines): opening message + omission notice.
-    if (sizeOf(out) > available) out = [lines[0], `  ... ${lines.length - 1} more messages omitted by --max-chars ...`];
+    if (sizeOf(out) > available && lines.length >= 2) {
+      // One head + one tail still over: shrink the two lines themselves.
+      const notice = `  ... ${lines.length - 2} messages sampled out ...`;
+      const share = Math.max(40, Math.floor((available - bytes(notice) - 3) / 2));
+      out = [truncate(lines[0], share), notice, truncate(lines[lines.length - 1], share)];
+    }
+    if (sizeOf(out) > available) out = [truncate(lines[0], Math.max(40, available - 1))];
     for (const l of out) console.log(l);
     return;
   }
@@ -658,6 +698,14 @@ async function selfTest() {
     // a huge query must not blow the budget echoing itself in the header
     const longQ = run(['--query', 'z'.repeat(1500), '--max-chars', '500']);
     check('long query echo truncated', Buffer.byteLength(longQ) <= 500);
+    // zero hits must not exempt metadata from the ceiling: a many-word --any miss
+    // would otherwise dump its whole df table
+    const missWords = Array.from({ length: 120 }, (_, i) => `zzmiss${i}`).join(' ');
+    const missText = run(['--query', missWords, '--any', '--max-chars', '500']);
+    check('zero-hit text under ceiling', Buffer.byteLength(missText) <= 500);
+    const missJson = run(['--query', missWords, '--any', '--max-chars', '500', '--json']);
+    check('zero-hit json under ceiling', Buffer.byteLength(missJson) <= 500);
+    check('zero-hit json still parses', JSON.parse(missJson).totalMatches === 0);
     // non-ASCII: bytes, not UTF-16 units — CJK output must respect the same ceiling
     const cjk = run(['--query', '現地時間', '--limit', '30', '--max-chars', '600']);
     check('cjk query finds hits', Number(cjk.match(/shown=(\d+)/)[1]) >= 1);
@@ -668,6 +716,19 @@ async function selfTest() {
     const dfAll = JSON.parse(run(['--query', 'sidebar flumoxide', '--any', '--json']));
     const dfUser = JSON.parse(run(['--query', 'sidebar flumoxide', '--any', '--role', 'user', '--json']));
     check('word df counted after filters', dfUser.wordHits.sidebar < dfAll.wordHits.sidebar);
+    // shown>=1 even when the only match lives under a deeply nested path
+    const deep = path.join(dir, 'deep', ...Array.from({ length: 12 }, (_, i) => `nested-directory-level-${i}`));
+    fs.mkdirSync(deep, { recursive: true });
+    fs.writeFileSync(path.join(deep, 'deepdeep1.jsonl'), line('user', text('DEEPNEEDLE only match here'), '2026-06-12T08:00:00Z'));
+    const deepText = run(['--query', 'DEEPNEEDLE', '--max-chars', '500']);
+    check('deep-path text still shows the hit', /shown=1/.test(deepText));
+    check('deep-path text under ceiling', Buffer.byteLength(deepText) <= 500);
+    const deepJson = JSON.parse(run(['--query', 'DEEPNEEDLE', '--max-chars', '500', '--json']));
+    check('deep-path json still shows the hit', deepJson.shown === 1);
+    const deepWin = run(['--session', 'deepdeep1', '--at', '0', '--max-chars', '500']);
+    check('deep-path window under ceiling', Buffer.byteLength(deepWin) <= 500);
+    const deepSkim = run(['--skim', 'deepdeep1', '--max-chars', '500']);
+    check('deep-path skim under ceiling', Buffer.byteLength(deepSkim) <= 500);
 
     // zero-hit hint
     const miss = run(['--query', 'totally absent phrase here']);

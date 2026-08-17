@@ -16,20 +16,27 @@ const GREP = join(here, '..', 'skills', 'session-grep', 'session-grep.mjs');
 const hasRg = spawnSync('rg', ['--version'], { stdio: 'ignore' }).status === 0;
 const skip = !hasRg && 'ripgrep not installed';
 
-// One logical conversation — ASCII, CJK, and emoji — encoded three ways.
+// One logical conversation — ASCII, CJK, emoji, combining marks, and a multipart
+// message — encoded three ways. Tool echoes (a Claude tool_result-only message and
+// a Pi toolResult message; Codex keeps tool output outside message records) are
+// interleaved and must vanish identically under the default tool exclusion.
 const CONVO = [
-  { role: 'user', text: 'alpha question about KOALA9 rollout timing', ts: '2026-06-10T08:00:01Z' },
-  { role: 'assistant', text: 'the KOALA9 rollout failed with ENOSPACE on the runner', ts: '2026-06-10T08:00:02Z' },
-  { role: 'user', text: '現地時間のバグを修正して KOALA9 を再デプロイして', ts: '2026-06-10T08:00:03Z' },
-  { role: 'assistant', text: 'fixed and redeployed KOALA9 🚀 with emoji notes 🔥', ts: '2026-06-10T08:00:04Z' },
+  { role: 'user', parts: ['alpha question about KOALA9 rollout timing'], ts: '2026-06-10T08:00:01Z' },
+  { role: 'assistant', parts: ['the KOALA9 rollout failed with ENOSPACE on the runner'], ts: '2026-06-10T08:00:02Z' },
+  { role: 'user', parts: ['現地時間のバグを修正して KOALA9 を再デプロイして'], ts: '2026-06-10T08:00:03Z' },
+  { role: 'assistant', parts: ['fixed and redeployed KOALA9 🚀 with emoji notes 🔥'], ts: '2026-06-10T08:00:04Z' },
+  { role: 'assistant', parts: ['multipart résumé of the KOALA9 work', 'second part with a combining séquence'], ts: '2026-06-10T08:00:05Z' },
 ];
 
 const encodeClaude = (m) =>
-  JSON.stringify({ type: m.role, timestamp: m.ts, message: { role: m.role, content: [{ type: 'text', text: m.text }] } }) + '\n';
+  JSON.stringify({ type: m.role, timestamp: m.ts, message: { role: m.role, content: m.parts.map((text) => ({ type: 'text', text })) } }) + '\n';
 const encodeCodex = (m) =>
-  JSON.stringify({ type: 'response_item', timestamp: m.ts, payload: { type: 'message', role: m.role, content: [{ type: m.role === 'user' ? 'input_text' : 'output_text', text: m.text }] } }) + '\n';
+  JSON.stringify({ type: 'response_item', timestamp: m.ts, payload: { type: 'message', role: m.role, content: m.parts.map((text) => ({ type: m.role === 'user' ? 'input_text' : 'output_text', text })) } }) + '\n';
 const encodePi = (m, i) =>
-  JSON.stringify({ type: 'message', id: `id${i}`, parentId: i ? `id${i - 1}` : null, timestamp: m.ts, message: { role: m.role, content: [{ type: 'text', text: m.text }] } }) + '\n';
+  JSON.stringify({ type: 'message', id: `id${i}`, parentId: i ? `id${i - 1}` : null, timestamp: m.ts, message: { role: m.role, content: m.parts.map((text) => ({ type: 'text', text })) } }) + '\n';
+
+const claudeToolNoise = JSON.stringify({ type: 'user', timestamp: '2026-06-10T08:00:02Z', message: { role: 'user', content: [{ type: 'tool_result', content: 'TOOLNOISE KOALA9 echoed in tool output' }] } }) + '\n';
+const piToolNoise = JSON.stringify({ type: 'message', id: 'tool1', parentId: 'id1', timestamp: '2026-06-10T08:00:02Z', message: { role: 'toolResult', toolCallId: 'c1', toolName: 'bash', content: [{ type: 'text', text: 'TOOLNOISE KOALA9 echoed in tool output' }], isError: false } }) + '\n';
 
 let root;
 before(() => {
@@ -37,12 +44,24 @@ before(() => {
   mkdirSync(join(root, 'proj'), { recursive: true });
   mkdirSync(join(root, 'codex'), { recursive: true });
   mkdirSync(join(root, 'pi'), { recursive: true });
-  writeFileSync(join(root, 'proj', 'claudeaaaa.jsonl'), CONVO.map(encodeClaude).join(''));
+  const claudeLines = CONVO.map(encodeClaude);
+  claudeLines.splice(2, 0, claudeToolNoise);
+  writeFileSync(join(root, 'proj', 'claudeaaaa.jsonl'), claudeLines.join(''));
   writeFileSync(join(root, 'codex', 'rollout-bbbb.jsonl'), CONVO.map(encodeCodex).join(''));
+  const piLines = CONVO.map(encodePi);
+  piLines.splice(2, 0, piToolNoise);
   writeFileSync(
     join(root, 'pi', '2026-06-10T08-00-00_pipi.jsonl'),
-    JSON.stringify({ type: 'session', version: 3, id: 'pipi', timestamp: '2026-06-10T08:00:00Z', cwd: '/tmp' }) + '\n' + CONVO.map(encodePi).join(''),
+    JSON.stringify({ type: 'session', version: 3, id: 'pipi', timestamp: '2026-06-10T08:00:00Z', cwd: '/tmp' }) + '\n' + piLines.join(''),
   );
+  // Volume fixture: 150 short hits to exercise 100+ index prefixes under the budget.
+  const many = Array.from({ length: 150 }, (_, i) =>
+    JSON.stringify({ type: 'user', timestamp: `2026-06-11T0${Math.floor(i / 60) % 10}:${String(i % 60).padStart(2, '0')}:00Z`, message: { role: 'user', content: [{ type: 'text', text: `MANYHIT filler message number ${i}` }] } }) + '\n').join('');
+  writeFileSync(join(root, 'proj', 'manyhits.jsonl'), many);
+  // Emoji session for tiny-budget skim: head and tail must both survive sampling.
+  const emo = Array.from({ length: 5 }, (_, i) =>
+    JSON.stringify({ type: 'user', timestamp: `2026-06-12T08:00:0${i}Z`, message: { role: 'user', content: [{ type: 'text', text: `🚀🔥 emoji message number ${i} ${'x'.repeat(100)}` }] } }) + '\n').join('');
+  writeFileSync(join(root, 'proj', 'emojisess.jsonl'), emo);
 });
 after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -56,10 +75,19 @@ test('adapter equivalence: three encodings parse to identical roles, texts, orde
   for (const m of out.matches) (bySource[m.source] ??= []).push(m);
   assert.deepEqual(Object.keys(bySource).sort(), ['claude', 'codex', 'pi']);
   const shape = (ms) => ms.sort((a, b) => a.index - b.index).map((m) => `${m.index}|${m.match.role}|${m.match.text}`);
-  const claude = shape(bySource.claude);
+  const claude = shape(bySource.claude.filter((m) => m.id === 'claudeaaaa'));
   assert.deepEqual(shape(bySource.codex), claude);
   assert.deepEqual(shape(bySource.pi), claude);
   assert.equal(claude.length, CONVO.length);
+});
+
+test('adapter equivalence: tool echoes are excluded identically, indexes unshifted', { skip }, () => {
+  // The noise mentions KOALA9; with default exclusion it must match nowhere and the
+  // conversational indexes must be identical across encodings despite the extra records.
+  const noise = runJson(['--query', 'TOOLNOISE', '--limit', '50', '--max-chars', '30000']);
+  assert.equal(noise.totalMatches, 0);
+  const withTools = runJson(['--query', 'TOOLNOISE', '--limit', '50', '--max-chars', '30000', '--include-tools']);
+  assert.deepEqual(withTools.matches.map((m) => m.source).sort(), ['claude', 'pi']);
 });
 
 test('budget dominance: rendered bytes <= budget for every mode and encoding', { skip }, () => {
@@ -81,6 +109,31 @@ test('budget dominance: rendered bytes <= budget for every mode and encoding', {
       );
     }
   }
+});
+
+test('budget dominance under volume: 100+ rendered hits stay under the ceiling', { skip }, () => {
+  const out = run(['--query', 'MANYHIT', '--limit', '200', '--before', '0', '--after', '0', '--max-chars', '22000']);
+  assert.ok(Buffer.byteLength(out) <= 22000, `${Buffer.byteLength(out)} bytes`);
+  assert.ok(Number(out.match(/shown=(\d+)/)[1]) >= 100, 'fixture must actually render 100+ hits');
+});
+
+test('tiny-budget skim keeps head and tail', { skip }, () => {
+  const out = run(['--skim', 'emojisess', '--max-chars', '500']);
+  assert.ok(Buffer.byteLength(out) <= 500, `${Buffer.byteLength(out)} bytes`);
+  assert.ok(out.includes('[0]'), 'head missing');
+  assert.ok(out.includes('[4]'), 'tail missing');
+});
+
+test('--max-tokens N is exactly --max-chars 4N', { skip }, () => {
+  const byChars = run(['--query', 'koala9', '--limit', '50', '--max-chars', '600']);
+  const byTokens = run(['--query', 'koala9', '--limit', '50', '--max-tokens', '150']);
+  assert.equal(byTokens, byChars);
+});
+
+test('--session without --at is rejected, not silently ignored', { skip }, () => {
+  const res = spawnSync(process.execPath, [GREP, '--query', 'koala9', '--session', 'claudeaaaa', '--root', root], { encoding: 'utf8' });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /--session requires --at/);
 });
 
 test('budget monotonicity: raising --max-chars never shrinks the emitted set', { skip }, () => {
