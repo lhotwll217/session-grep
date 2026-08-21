@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const GREP = join(here, '..', 'skills', 'session-grep', 'session-grep.mjs');
 const hasRg = spawnSync('rg', ['--version'], { stdio: 'ignore' }).status === 0;
+const hasSqlite = spawnSync('sqlite3', ['--version'], { stdio: 'ignore' }).status === 0;
 
 const claudeLine = (role, text, ts) =>
   JSON.stringify({ type: role, timestamp: ts, message: { role, content: [{ type: 'text', text }] } }) + '\n';
@@ -113,6 +114,106 @@ test('pi adapter and --exclude-re path blacklist', { skip: !hasRg && 'ripgrep no
       execFileSync(process.execPath, [GREP, '--query', 'pineedle', '--root', root, '--exclude-re', 'cccc', '--json'], { encoding: 'utf8' }),
     );
     assert.equal(excluded.totalMatches, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('OpenCode SQLite adapter supports search, tool gating, and stable pointers', {
+  skip: (!hasRg && 'ripgrep not installed') || (!hasSqlite && 'sqlite3 not installed'),
+}, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-opencode-'));
+  try {
+    const database = join(root, 'opencode.db');
+    const sqlString = (value) => `'${String(value).replaceAll("'", "''")}'`;
+    const sessionId = 'ses_opencode123';
+    const userMessage = JSON.stringify({ role: 'user' });
+    const assistantMessage = JSON.stringify({ role: 'assistant' });
+    const userPart = JSON.stringify({ type: 'text', text: 'OPENCODENEEDLE asks about SQLite history' });
+    const assistantPart = JSON.stringify({ type: 'text', text: 'OPENCODENEEDLE answer keeps stable pointers' });
+    const toolPart = JSON.stringify({ type: 'tool', tool: 'bash', state: { status: 'completed', output: 'OPENCODETOOLNOISE only in tool output' } });
+    const toolErrorPart = JSON.stringify({ type: 'tool', tool: 'bash', state: { status: 'error', error: 'OPENCODEFAILEDNOISE failed tool detail' } });
+    const syntheticPart = JSON.stringify({ type: 'text', synthetic: true, text: 'OPENCODESYNTHETICNOISE machine-generated echo' });
+    const sameStampPartA = JSON.stringify({ type: 'text', text: 'SAMESTAMP first part' });
+    const sameStampPartB = JSON.stringify({ type: 'text', text: 'SAMESTAMP second part' });
+    execFileSync('sqlite3', [database, `
+      CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+      INSERT INTO session VALUES (${sqlString(sessionId)}, '/work/private-project');
+      INSERT INTO message VALUES ('msg_user', ${sqlString(sessionId)}, 1781088001000, ${sqlString(userMessage)});
+      INSERT INTO message VALUES ('msg_assistant', ${sqlString(sessionId)}, 1781088002000, ${sqlString(assistantMessage)});
+      INSERT INTO message VALUES ('msg_same_stamp', ${sqlString(sessionId)}, 1781088002000, ${sqlString(assistantMessage)});
+      INSERT INTO part VALUES ('part_user', 'msg_user', ${sqlString(sessionId)}, 1781088001000, ${sqlString(userPart)});
+      INSERT INTO part VALUES ('part_assistant', 'msg_assistant', ${sqlString(sessionId)}, 1781088002000, ${sqlString(assistantPart)});
+      INSERT INTO part VALUES ('part_tool', 'msg_assistant', ${sqlString(sessionId)}, 1781088003000, ${sqlString(toolPart)});
+      INSERT INTO part VALUES ('part_tool_error', 'msg_assistant', ${sqlString(sessionId)}, 1781088004000, ${sqlString(toolErrorPart)});
+      INSERT INTO part VALUES ('part_synthetic', 'msg_assistant', ${sqlString(sessionId)}, 1781088005000, ${sqlString(syntheticPart)});
+      INSERT INTO part VALUES ('part_same_a', 'msg_same_stamp', ${sqlString(sessionId)}, 1781088002500, ${sqlString(sameStampPartA)});
+      INSERT INTO part VALUES ('part_same_b', 'msg_same_stamp', ${sqlString(sessionId)}, 1781088004500, ${sqlString(sameStampPartB)});
+    `]);
+
+    const search = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'opencodeneedle', '--root', root, '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(search.totalMatches, 2);
+    assert.ok(search.matches.every((match) => match.source === 'opencode' && match.id === sessionId));
+    assert.match(search.matches[0].path, /opencode\.db#ses_opencode123/);
+
+    const hiddenTool = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'OPENCODETOOLNOISE', '--root', root, '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(hiddenTool.totalMatches, 0);
+    const hiddenSynthetic = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'OPENCODESYNTHETICNOISE', '--root', root, '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(hiddenSynthetic.totalMatches, 0);
+    const visibleTool = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'OPENCODETOOLNOISE', '--root', root, '--include-tools', '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(visibleTool.totalMatches, 1);
+    const visibleError = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'OPENCODEFAILEDNOISE', '--root', root, '--include-tools', '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(visibleError.totalMatches, 1);
+    const visibleSynthetic = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'OPENCODESYNTHETICNOISE', '--root', root, '--include-tools', '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(visibleSynthetic.totalMatches, 1);
+    const sameStamp = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'SAMESTAMP', '--root', root, '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(sameStamp.totalMatches, 1, 'equal-timestamp message parts stay grouped');
+    assert.match(sameStamp.matches[0].match.text, /first part.*second part/);
+
+    const window = execFileSync(
+      process.execPath,
+      [GREP, '--session', sessionId, '--at', '1', '--root', root],
+      { encoding: 'utf8' },
+    );
+    assert.match(window, /\[1\]\*/);
+    assert.match(window, /stable pointers/);
+
+    const excluded = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'opencodeneedle', '--root', root, '--exclude-re', 'private-project', '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(excluded.totalMatches, 0, 'display-path project metadata participates in privacy exclusions');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
