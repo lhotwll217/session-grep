@@ -2,7 +2,7 @@
   "name": "session-grep",
   "version": "0.1.1",
   "private": true,
-  "description": "Grep AI coding-session transcripts (Claude Code, Codex, Pi) with bounded message context — built for agents. Includes rarity-ranked multi-word search, session overviews, sampled spines, and a built-in self-test.",
+  "description": "Grep AI coding-session transcripts (Claude Code, Codex, OpenCode, Pi) with bounded message context — built for agents. Includes rarity-ranked multi-word search, session overviews, sampled spines, and a built-in self-test.",
   "type": "module",
   "scripts": {
     "eval": "promptfoo eval -c eval/promptfooconfig.yaml --no-cache",
