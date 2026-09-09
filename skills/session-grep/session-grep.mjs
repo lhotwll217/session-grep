@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // session-grep — literal/regex grep across AI coding-session transcripts (Claude Code,
-// Codex, Pi) returning bounded MESSAGE context around each hit, not raw JSONL lines.
+// Codex, OpenCode, Pi) returning bounded MESSAGE context around each hit, not raw records.
 // Extracted from owner-operator's sessions-grep skill; standalone here so it can be
 // shared, vendored back into wrappers, and continuously eval-tuned (see eval/).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { configuredSourceOf, loadSessionSources } from './sources.mjs';
 
 function expandHome(p) {
@@ -54,8 +54,8 @@ for (let i = 0; i < args.length; i++) {
 // format, each exporting {name, detect(file), message(record, opts), fallback?}.
 // Supporting a new JSONL-based tool = dropping one file in that folder (plus a
 // --self-test fixture below). `--target-type` values and dispatch derive from what's
-// loaded. Non-JSONL formats (Cursor's sqlite, opencode's split JSON) also need a
-// reader change here; see SKILL.md "Onboarding" for the format map.
+// loaded. Non-JSONL adapters may expose materialize(root, destination, opts) to
+// provide temporary JSONL to the shared retrieval pipeline.
 import { fileURLToPath, pathToFileURL } from 'node:url';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const ADAPTERS = {};
@@ -116,7 +116,7 @@ const excludeRes = opts.excludeRe.map((p) => {
     usage(1, `--exclude-re: invalid JavaScript regex ${JSON.stringify(p)}: ${error.message}`);
   }
 });
-const isExcluded = (file) => excludeRes.some((re) => re.test(file));
+const isExcluded = (file) => excludeRes.some((re) => re.test(file) || re.test(displayPath(file)));
 const isExcludedSession = (file) =>
   opts.excludeSessions.some((prefix) => sessionId(file).startsWith(prefix));
 
@@ -153,6 +153,7 @@ const DEFAULT_SOURCES = [
   { type: 'claude', root: '~/.claude/projects' },
   { type: 'codex', root: '~/.codex/sessions' },
   { type: 'codex', root: '~/.codex/archived_sessions' },
+  { type: 'opencode', root: '~/.local/share/opencode' },
   { type: 'pi', root: '~/.pi/agent/sessions' },
 ];
 const sourceNames = Object.keys(ADAPTERS);
@@ -178,7 +179,7 @@ if (opts.targetRoots.length) {
   }
   sourceMap = { ...sourceMap, roots: filtered };
 }
-const roots = sourceMap.roots.map((entry) => entry.root).filter((dir) => fs.existsSync(dir));
+const configuredRoots = sourceMap.roots.map((entry) => entry.root).filter((dir) => fs.existsSync(dir));
 if (opts.listRoots) {
   console.log(`origin=${sourceMap.origin}`);
   console.log(`config=${sourceMap.configPath ?? '(none)'}`);
@@ -186,7 +187,64 @@ if (opts.listRoots) {
   for (const entry of sourceMap.roots) console.log(`${entry.type}\texists=${fs.existsSync(entry.root)}\t${entry.root}`);
   process.exit(0);
 }
-if (!roots.length) usage(1, 'No session roots found to search — edit DEFAULT_SOURCES / pass --sources-file / set SESSION_GREP_SOURCES_FILE (see SKILL.md "Onboarding") or pass --root DIR');
+if (!configuredRoots.length) usage(1, 'No session roots found to search — edit DEFAULT_SOURCES / pass --sources-file / set SESSION_GREP_SOURCES_FILE (see SKILL.md "Onboarding") or pass --root DIR');
+
+// Non-JSONL stores are exported into an invocation-owned temporary directory.
+// This keeps the retrieval path and all output-budget guarantees shared across
+// adapters without leaving a persistent transcript cache behind.
+let materializedDir = null;
+let materializedCleaning = false;
+const cleanupMaterialized = () => {
+  if (!materializedDir || materializedCleaning) return;
+  materializedCleaning = true;
+  fs.rmSync(materializedDir, { recursive: true, force: true });
+};
+const guardMaterialized = (dir) => {
+  // Signal handlers cannot run while later synchronous rg/parsing work is in
+  // progress. Let signals retain their default immediate behavior and use a
+  // detached watchdog to remove sensitive material after any abrupt parent exit.
+  const code = `
+    const fs = require('node:fs');
+    const pid = Number(process.argv[1]);
+    const dir = process.argv[2];
+    const timer = setInterval(() => {
+      try { process.kill(pid, 0); }
+      catch {
+        fs.rmSync(dir, { recursive: true, force: true });
+        clearInterval(timer);
+      }
+    }, 50);
+  `;
+  const watchdog = spawn(process.execPath, ['-e', code, String(process.pid), dir], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  watchdog.unref();
+};
+const roots = [];
+for (const root of configuredRoots) {
+  const configured = sourceMap.roots.find((entry) => path.resolve(entry.root) === path.resolve(root));
+  const adapter = configured?.type !== 'auto'
+    ? ADAPTERS[configured?.type]
+    : Object.values(ADAPTERS).find((candidate) => candidate.detectRoot?.(root));
+  if (!adapter?.materialize || (targetTypes.size && !targetTypes.has(adapter.name))) {
+    roots.push(root);
+    continue;
+  }
+  if (!materializedDir) {
+    materializedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-grep-materialized-'));
+    process.once('exit', cleanupMaterialized);
+    guardMaterialized(materializedDir);
+  }
+  const destination = path.join(materializedDir, adapter.name, String(roots.length));
+  const result = await adapter.materialize(root, destination, { includeTools: opts.includeTools });
+  if (result.error) {
+    if (targetTypes.has(adapter.name)) usage(1, `${adapter.name}: ${result.error}`);
+    console.error(`session-grep: warning: skipping ${adapter.name} sessions: ${result.error}`);
+  }
+  roots.push(...(result.roots ?? []));
+}
+if (!roots.length) usage(1, 'No readable session roots found for the selected source types');
 
 // Browse modes answer "which session?" and "what happened in it?" in one call each —
 // whole-thread questions shouldn't cost 20 grep probes. A skim substitutes for many
@@ -213,7 +271,7 @@ if (opts.session && opts.at != null) {
   const from = Math.max(0, opts.at - b);
   const to = Math.min(messages.length - 1, opts.at + a);
   // The header is budgeted too: a deep path must not bust a small budget on line one.
-  const head = truncate(`window id=${sessionId(file)} messages ${from}..${to} of ${messages.length} path=${file}`, opts.maxChars - 80);
+  const head = truncate(`window id=${sessionId(file)} messages ${from}..${to} of ${messages.length} path=${displayPath(file)}`, opts.maxChars - 80);
   console.log(head);
   const available = opts.maxChars - bytes(head) - 1 - 80; // 80: reserve for the truncation notice
   const lineFor = (i, cap) => {
@@ -323,7 +381,7 @@ for (const file of files) {
     matches.push({
       source,
       id: sessionId(file),
-      path: file,
+      path: displayPath(file),
       index: i,
       timestamp: msg.timestamp,
       time,
@@ -540,6 +598,11 @@ function sourceOf(file) {
   }
 }
 
+function displayPath(file) {
+  const adapter = ADAPTERS[sourceOf(file)];
+  return adapter?.displayPath?.(file) ?? file;
+}
+
 function parseMessages(raw, source) {
   const out = [];
   for (const line of raw.split('\n')) {
@@ -594,7 +657,7 @@ function browse() {
     const messages = parseMessages(fs.readFileSync(file, 'utf8'), sourceOf(file));
     const line = (m, i, cap) => `[${i}] ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${cap == null ? m.text.replace(/\s+/g, ' ').trim() : truncate(m.text, cap)}`;
     // The header is budgeted too: a deep path must not bust a small budget on line one.
-    const header = truncate(`skim id=${sessionId(file)} messages=${messages.length} path=${file}`, opts.maxChars - 160);
+    const header = truncate(`skim id=${sessionId(file)} messages=${messages.length} path=${displayPath(file)}`, opts.maxChars - 160);
     // A short conversation should be lossless: --max-chars is the actual aperture. The old
     // eager 200-char clip discarded decisive facts even when the complete session was only
     // ~1KB, forcing agents into repeated synonym queries that could never recover the tail.
@@ -682,7 +745,7 @@ function browse() {
     digests.push({
       id: sessionId(file),
       source,
-      path: file,
+      path: displayPath(file),
       from: times.length ? new Date(Math.min(...times)).toISOString().slice(0, 16) : '?',
       to: times.length ? new Date(Math.max(...times)).toISOString().slice(0, 16) : '?',
       user: messages.filter((m) => m.role === 'user').length,
@@ -752,7 +815,7 @@ function normalizeQueryRegex(pattern, caseSensitive) {
 
 function usage(code, msg) {
   if (msg) console.error(msg);
-  console.error('Usage: session-grep.mjs --query TEXT [--session ID] [--any] [--candidates] [--regex] [--limit N] [--before N] [--after N] [--role user|assistant|all] [--target-type claude|codex|pi|all ...] [--source claude|codex|pi|all] [--since today|Nd|YYYY-MM-DD] [--sort newest|oldest|file] [--root DIR ...] [--sources-file FILE] [--target-root DIR ...] [--exclude-session ID_PREFIX ...] [--exclude-re REGEX ...] [--max-chars BYTES | --max-tokens N] [--include-tools] [--case-sensitive] [--json] | --overview | --skim ID | --session ID --at INDEX | --list-roots | --self-test');
+  console.error(`Usage: session-grep.mjs --query TEXT [--session ID] [--any] [--candidates] [--regex] [--limit N] [--before N] [--after N] [--role user|assistant|all] [--target-type ${Object.keys(ADAPTERS).join('|')}|all ...] [--source TYPE] [--since today|Nd|YYYY-MM-DD] [--sort newest|oldest|file] [--root DIR ...] [--sources-file FILE] [--target-root DIR ...] [--exclude-session ID_PREFIX ...] [--exclude-re REGEX ...] [--max-chars BYTES | --max-tokens N] [--include-tools] [--case-sensitive] [--json] | --overview | --skim ID | --session ID --at INDEX | --list-roots | --self-test`);
   process.exit(code);
 }
 

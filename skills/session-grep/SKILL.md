@@ -27,13 +27,13 @@ homes:
 |---|---|---|
 | Claude Code | `~/.claude/projects` | jsonl (supported) |
 | Codex CLI | `~/.codex/sessions`, `~/.codex/archived_sessions` | jsonl (supported) |
+| OpenCode | `~/.local/share/opencode` | sqlite (supported; requires `sqlite3`) |
 | Pi | `~/.pi/agent/sessions` | jsonl (supported) |
 | Cursor | `~/Library/Application Support/Cursor/User/workspaceStorage` (macOS), `~/.config/Cursor/...` (linux) | sqlite (not yet parseable) |
 | Gemini CLI | `~/.gemini/tmp` | json (not yet parseable) |
-| opencode | `~/.local/share/opencode/storage` | split json (not yet parseable) |
 
 Hosts and launchers are not transcript formats. Roots are keyed by adapter `type`
-(`claude`, `codex`, `pi`) and directory.
+(`claude`, `codex`, `opencode`, `pi`) and directory.
 
 Quick existence check: `ls -d ~/.claude/projects ~/.codex/sessions 2>/dev/null`.
 There are four ways to search somewhere other than the defaults, in order of
@@ -60,7 +60,7 @@ The override file is a plain array:
 ]
 ```
 
-`type` must be an adapter that session-grep supports (`claude`, `codex`, or `pi` today) —
+`type` must be an adapter that session-grep supports (`claude`, `codex`, `opencode`, or `pi` today) —
 it selects the parser, so a relocated Codex store does not need `codex` in its path.
 An override is authoritative: it does not teach a new format, only routes a known
 parser at a directory. A missing, unparseable, or non-array `--sources-file` fails
@@ -78,7 +78,9 @@ The default routes live in `DEFAULT_SOURCES`, the source resolver lives in
 Format support lives in the `adapters/` folder next to the script — one file per
 tool, each exporting `{name, detect(file), message(record, opts)}`. Supporting a
 new JSONL-based tool means dropping one file in that folder (and adding a
-`--self-test` fixture); non-JSONL formats also need a reader change in the script.
+`--self-test` fixture). Non-JSONL adapters can additionally expose
+`materialize(root, destination, opts)` to feed temporary JSONL into the same
+retrieval pipeline; OpenCode's SQLite adapter uses this seam.
 
 ## When to use
 
@@ -175,11 +177,11 @@ Common flags:
 - `--before N` messages before each hit, default 1
 - `--after N` messages after each hit, default 1
 - `--role user|assistant|all` filter matching messages, default `all`
-- `--target-type claude|codex|pi|all` narrow to one or more parser/source types, default `all`; repeatable
-- `--source claude|codex|pi|all` accepted as a compatibility alias for `--target-type`
+- `--target-type claude|codex|opencode|pi|all` narrow to one or more parser/source types, default `all`; repeatable
+- `--source claude|codex|opencode|pi|all` accepted as a compatibility alias for `--target-type`
 - `--since today|Nd|YYYY-MM-DD` filter by message/session timestamp
 - `--sort newest|oldest|file` output order, default `newest`
-- `--root DIR` search this directory of `*.jsonl` transcripts instead of the default live stores (repeatable)
+- `--root DIR` search this transcript root instead of the default live stores (repeatable)
 - `--sources-file FILE` use a JSON array of typed `{ type, root }` sources instead of defaults
 - `--target-root DIR` narrow the configured source map to one or more roots while preserving parser type
 - `--exclude-session ID_PREFIX` exclude a stable session ID (repeatable); unlike `--exclude-re`, this follows canonical IDs rather than filename layout
