@@ -557,9 +557,13 @@ function sourceOf(file) {
 function reduceSkillBody(msg) {
   // Declared inside the hoisted function: top-level search runs before this point in
   // module order, so a module-scope const would be in its temporal dead zone.
-  const match = /^\s*Base directory for this skill:\s*(\S+)/.exec(msg.text);
-  if (!match) return msg;
-  return { ...msg, text: `[skill body omitted: ${path.basename(match[1])}]` };
+  // Claude Code opens the injection with the skill's base directory; Codex wraps it in
+  // <skill><name>. Both carry the whole SKILL.md after that point.
+  const claude = /^\s*Base directory for this skill:\s*(\S+)/.exec(msg.text);
+  if (claude) return { ...msg, text: `[skill body omitted: ${path.basename(claude[1])}]` };
+  const codex = /^\s*<skill>\s*<name>([^<]+)<\/name>/.exec(msg.text);
+  if (codex) return { ...msg, text: `[skill body omitted: ${codex[1].trim()}]` };
+  return msg;
 }
 
 function parseMessages(raw, source) {
@@ -1018,6 +1022,13 @@ async function selfTest() {
     check('invocation event survives exclusion', evt.totalMatches === 1 && evt.matches[0].index === 0);
     // The marker is a display placeholder, not an index: the ripgrep prefilter matches raw
     // file bytes, which still hold the original body, so the substituted text is unsearchable.
+    // Codex wraps the same injection differently; both formats reduce.
+    fs.writeFileSync(path.join(skDir, 'codexinj.jsonl'),
+      line('user', text('<skill>\n<name>demo-skill</name>\n<path>/home/u/.agents/skills/demo-skill/SKILL.md</path>\n---\nSearches things with QUOKKAWORD matching.'), '2026-06-20T09:00:00Z'));
+    const codexOff = JSON.parse(skRun(['--query', 'QUOKKAWORD', '--json']));
+    check('codex <skill> injection excluded too', codexOff.totalMatches === 1);
+    const codexOn = JSON.parse(skRun(['--query', 'QUOKKAWORD', '--include-skill-bodies', '--json']));
+    check('--include-skill-bodies restores both formats', codexOn.totalMatches === 3);
     const named = JSON.parse(skRun(['--query', 'skill body omitted', '--json']));
     check('substituted marker is not itself searchable', named.totalMatches === 0);
     // The body message keeps its slot, so a pointer past it still lands correctly.
