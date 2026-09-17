@@ -671,6 +671,15 @@ function browse() {
   const digests = [];
   for (const file of files) {
     const source = sourceOf(file);
+    // A file's mtime is its last write, so it is never older than its newest message.
+    // When --since is set, an older mtime therefore guarantees lastTime < sinceTime and
+    // the digest would be dropped below anyway — skip the read+parse instead of doing
+    // 2.5GB of work to discard it. Errs toward including (a restored file looks new).
+    if (sinceTime != null) {
+      let mtime;
+      try { mtime = fs.statSync(file).mtimeMs; } catch { continue; }
+      if (mtime < sinceTime) continue;
+    }
     let raw;
     try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
     const messages = parseMessages(raw, source);
@@ -688,7 +697,7 @@ function browse() {
       user: messages.filter((m) => m.role === 'user').length,
       assistant: messages.filter((m) => m.role === 'assistant').length,
       mb: (raw.length / 1e6).toFixed(1),
-      opening: truncate(first.text, 220),
+      opening: truncate(openingText(first.text), 220),
       lastTime,
     });
   }
@@ -709,6 +718,22 @@ function browse() {
 
 // Byte-budgeted truncation (n is bytes, ≈ chars for ASCII). Never splits a surrogate
 // pair, so CJK/emoji previews stay valid text and cost what they claim.
+// The first user message of a harness-launched session opens with injected preamble
+// (worktree system-reminders, a slash command's own header) rather than what the person
+// actually asked. That preamble is the same in every such session, so showing it makes
+// the digest's one signal-bearing field useless. Strip the leading wrapper blocks; if
+// nothing else is left, keep the original so the digest never shows a blank opening.
+function openingText(text) {
+  const stripped = text
+    .replace(/^\s*Caveat: The messages below[^]*?<\/command-message>/, '')
+    .replace(/<system-reminder>[^]*?<\/system-reminder>/g, '')
+    .replace(/<command-(?:message|name)>[^]*?<\/command-(?:message|name)>/g, '')
+    // command-args is the person's actual ask, so unwrap it rather than dropping it.
+    .replace(/<command-args>([^]*?)<\/command-args>/g, '$1')
+    .trim();
+  return stripped || text;
+}
+
 function truncate(s, n) {
   const oneLine = s.replace(/\s+/g, ' ').trim();
   if (Buffer.byteLength(oneLine) <= n) return oneLine;
@@ -924,6 +949,35 @@ async function selfTest() {
     check('overview honors --target-type', ovCodex.includes('rollout-cccc') && !ovCodex.includes('aaaa1111') && !ovCodex.includes('bbbb2222'));
     const ovRecent = run(['--overview', '--since', '2026-06-06']);
     check('overview honors --since', ovRecent.includes('rollout-cccc') && !ovRecent.includes('aaaa1111') && !ovRecent.includes('bbbb2222'));
+    // Overview preamble/prune checks live in their own root so the fixtures cannot
+    // perturb the file and session counts the other cases assert on.
+    const ovDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-grep-overview-'));
+    const ovRun = (args) => runRaw([...args, '--root', ovDir]);
+    const ovOpening = (out, id) => {
+      const lines = out.split('\n');
+      return lines[lines.findIndex((l) => l.includes(id)) + 1] ?? '';
+    };
+    fs.writeFileSync(path.join(ovDir, 'keep1111.jsonl'), line('user', text('KEEPMARKER in window'), '2026-06-20T08:00:00Z'));
+    // --since prunes by file mtime before reading; a file whose mtime predates the
+    // window must drop out, and one written inside it must survive the shortcut.
+    const staleFile = path.join(ovDir, 'stale111.jsonl');
+    fs.writeFileSync(staleFile, line('user', text('STALEONLY marker'), '2026-06-20T08:00:00Z'));
+    fs.utimesSync(staleFile, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+    const ovStale = ovRun(['--overview', '--since', '2026-06-06', '--max-chars', '20000']);
+    check('overview mtime prune drops a stale file', !ovStale.includes('stale111'));
+    check('overview mtime prune keeps in-window files', ovStale.includes('keep1111'));
+    // the digest opening shows the ask, not the harness preamble wrapped around it
+    fs.writeFileSync(path.join(ovDir, 'preamb11.jsonl'), line('user', text(
+      '<system-reminder>You are operating in a git worktree.</system-reminder> <command-message>do-thing</command-message> <command-name>/do-thing</command-name> <command-args>REALASK about the sidebar</command-args>',
+    ), '2026-06-21T08:00:00Z'));
+    // a session whose whole first message is the invocation keeps it rather than blanking
+    fs.writeFileSync(path.join(ovDir, 'onlycmd1.jsonl'), line('user', text(
+      '<command-message>bare</command-message> <command-name>/bare</command-name>',
+    ), '2026-06-22T08:00:00Z'));
+    const ovOpen = ovRun(['--overview', '--since', '2026-06-06', '--max-chars', '20000']);
+    const openText = ovOpening(ovOpen, 'preamb11');
+    check('opening strips injected preamble', openText.includes('REALASK') && !openText.includes('system-reminder'));
+    check('opening falls back rather than blanking', /\/bare/.test(ovOpening(ovOpen, 'onlycmd1')));
     const spine = run(['--skim', 'aaaa1111', '--max-chars', '900']);
     check('skim rendered output stays within byte budget', Buffer.byteLength(spine) <= 900);
     check('skim keeps head', spine.includes('number 0'));
