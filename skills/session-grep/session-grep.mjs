@@ -25,6 +25,7 @@ for (let i = 0; i < args.length; i++) {
   else if (a === '--target-type') opts.targetTypes.push(args[++i]);
   else if (a === '--source') opts.targetTypes.push(args[++i]);
   else if (a === '--since') opts.since = args[++i];
+  else if (a === '--include-skill-bodies') opts.includeSkillBodies = true;
   else if (a === '--sort') opts.sort = args[++i];
   else if (a === '--root') opts.roots.push(args[++i]);
   else if (a === '--sources-file') opts.sourcesFile = args[++i];
@@ -540,6 +541,27 @@ function sourceOf(file) {
   }
 }
 
+// Invoking a slash command injects the whole SKILL.md into the transcript as a user
+// message. That body is documentation, not conversation: it measured 12.8% of the
+// conversational bytes in this machine's Claude store at ~5.8KB a copy, and it matches
+// its own vocabulary, so it crowds real hits out of the bounded output budget.
+//
+// Reduce it in place rather than dropping the message, so the index stays aligned and a
+// --session/--at pointer still lands where the hit said it would. The substituted marker
+// is a display placeholder only — the ripgrep prefilter matches raw file bytes, which
+// still hold the original body, so the marker text itself is not searchable. The separate
+// <command-message>/<command-name>/<command-args> record is untouched — that is the
+// invocation event, and command-args carries what the person actually asked for — that
+// record is what keeps "when did I last invoke X" answerable.
+// --include-skill-bodies restores the raw text for searching the documentation itself.
+function reduceSkillBody(msg) {
+  // Declared inside the hoisted function: top-level search runs before this point in
+  // module order, so a module-scope const would be in its temporal dead zone.
+  const match = /^\s*Base directory for this skill:\s*(\S+)/.exec(msg.text);
+  if (!match) return msg;
+  return { ...msg, text: `[skill body omitted: ${path.basename(match[1])}]` };
+}
+
 function parseMessages(raw, source) {
   const out = [];
   for (const line of raw.split('\n')) {
@@ -548,7 +570,7 @@ function parseMessages(raw, source) {
     try { obj = JSON.parse(line); } catch { continue; }
     const msg = ADAPTERS[source].message(obj, { includeTools: opts.includeTools });
     if (!msg || !msg.text.trim()) continue;
-    out.push(msg);
+    out.push(opts.includeSkillBodies ? msg : reduceSkillBody(msg));
   }
   return out;
 }
@@ -978,6 +1000,30 @@ async function selfTest() {
     const openText = ovOpening(ovOpen, 'preamb11');
     check('opening strips injected preamble', openText.includes('REALASK') && !openText.includes('system-reminder'));
     check('opening falls back rather than blanking', /\/bare/.test(ovOpening(ovOpen, 'onlycmd1')));
+
+    // Injected slash-command skill bodies are excluded from matching, but the invocation
+    // event survives and the message index stays aligned for --session/--at pointers.
+    const skDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-grep-skillbody-'));
+    const skRun = (args) => runRaw([...args, '--root', skDir]);
+    fs.writeFileSync(path.join(skDir, 'skillinj.jsonl'),
+      line('user', text('<command-message>demo-skill</command-message> <command-name>/demo-skill</command-name> <command-args>find the FLUMOXIDE report</command-args>'), '2026-06-20T08:00:00Z')
+      + line('user', text('Base directory for this skill: /home/u/.claude/skills/demo-skill\n\n# demo-skill\n\nSearches things with QUOKKAWORD matching.'), '2026-06-20T08:00:01Z')
+      + line('assistant', text('QUOKKAWORD appears here in real conversation.'), '2026-06-20T08:00:02Z'));
+    const bodyOff = JSON.parse(skRun(['--query', 'QUOKKAWORD', '--json']));
+    check('skill body excluded from matching by default', bodyOff.totalMatches === 1
+      && bodyOff.matches[0].role !== 'user');
+    const bodyOn = JSON.parse(skRun(['--query', 'QUOKKAWORD', '--include-skill-bodies', '--json']));
+    check('--include-skill-bodies restores the body', bodyOn.totalMatches === 2);
+    const evt = JSON.parse(skRun(['--query', 'FLUMOXIDE', '--json']));
+    check('invocation event survives exclusion', evt.totalMatches === 1 && evt.matches[0].index === 0);
+    // The marker is a display placeholder, not an index: the ripgrep prefilter matches raw
+    // file bytes, which still hold the original body, so the substituted text is unsearchable.
+    const named = JSON.parse(skRun(['--query', 'skill body omitted', '--json']));
+    check('substituted marker is not itself searchable', named.totalMatches === 0);
+    // The body message keeps its slot, so a pointer past it still lands correctly.
+    const window = skRun(['--session', 'skillinj', '--at', '2', '--before', '2', '--after', '0']);
+    check('reduced body keeps the index aligned', /\[skill body omitted: demo-skill\]/.test(window)
+      && /QUOKKAWORD appears here/.test(window));
     const spine = run(['--skim', 'aaaa1111', '--max-chars', '900']);
     check('skim rendered output stays within byte budget', Buffer.byteLength(spine) <= 900);
     check('skim keeps head', spine.includes('number 0'));
