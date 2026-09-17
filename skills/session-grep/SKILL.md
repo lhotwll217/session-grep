@@ -187,6 +187,7 @@ Common flags:
 - `--list-roots` print the configured source/root map and whether each root exists
 - `--max-chars N` output budget in BYTES (≈ chars for ASCII), default 8000 — a hard ceiling on rendered output; every line (headers and sampling markers included) is charged, and excess hits are omitted with a notice, never dumped
 - `--max-tokens N` the same budget denominated in tokens (4 bytes ≈ 1 token)
+- `--include-skill-bodies` also match inside injected slash-command skill bodies (excluded by default: invoking a command injects the whole SKILL.md into the transcript as a user message, ~12.8% of conversational bytes, and it matches its own vocabulary). The invocation event — the `<command-message>`/`<command-name>`/`<command-args>` record, including what you asked for — is never excluded.
 - `--include-tools` also match inside tool_result blocks (excluded by default: they are file/command echoes, ~45% of bytes, and mostly restate the conversation)
 - `--case-sensitive` exact case match, useful for all-caps searches
 - `--json` machine-readable output (compact, same truncation and budget as text)
