@@ -35,7 +35,9 @@ ambiguous combinations fail closed.
 ## Answering a question
 
 1. **Scope by recency.** Recency is the default relevance heuristic: start with
-   `--since 7d` (or the window the ask names) and widen only when the result is thin.
+   `--since 7d` (or the window the ask names; `--until` closes it) and widen only when
+   the result is thin. A window also makes the search cheaper: files last written before
+   `--since` are never read.
 2. **Find.** `--any` with two to five rare words (identifiers, error strings, filenames),
    plus `--candidates` when the session is unknown. Use plain `--query` for exact text or
    punctuation and `--regex` for patterns. Multi-word literal phrases almost never occur
@@ -53,8 +55,9 @@ ambiguous combinations fail closed.
    - `+N forked copies` → the same message replayed by resumed sessions; the pointer
      shown is the earliest copy.
 4. **Drill in.** Every hit is a pointer: `--session ID --at IDX` from its header returns
-   the exact messages around it without re-searching. Done when the answer is quoted with
-   source, `id`/`idx`, and timestamp.
+   the exact messages around it without re-searching; add `--focus TEXT` so a long
+   message opens centred on the span that matched instead of its start. Done when the
+   answer is quoted with source, `id`/`idx`, and timestamp.
 
 For a broad ask ("what was session X about", "which session did Y"): `--overview` to
 find the session, `--skim ID` for its shape, then step 2 for specifics. Answer by
@@ -102,15 +105,16 @@ review prompts that otherwise dominate keyword-dense `--candidates` BEST hits.
 
 ## Flags
 
-- `--query TEXT` literal, or a JavaScript regex with `--regex` (case-insensitive by default; a leading `(?i)` is accepted). The query may itself begin with dashes, such as `--units`.
-- `--any` match ANY query word; whitespace and `|` delimit terms; reports per-word hit counts.
-- `--candidates` group hits by session before `--limit` and `--max-chars`; one best `id`/`best_idx` pointer per session (highest-ranked, not longest) plus its hit count.
-- `--session ID_PREFIX` scope a query to one session; with `--at INDEX` and no query, drill into a pointer (±5 by default, `--before/--after` to widen).
-- `--overview` / `--skim ID_PREFIX` / `--list-roots` the no-query modes.
-- `--limit N` default 20. `--before N` / `--after N` context per hit, default 1. `--role user|assistant|all`. `--since today|Nd|YYYY-MM-DD`. `--sort newest|oldest|file`. `--case-sensitive`.
-- `--target-type claude|codex|pi|all` (alias `--source`) and `--target-root DIR` narrow the configured sources, keeping the parser mapping; `--root DIR` is an untyped one-off root. Both repeatable.
-- `--exclude-session ID_PREFIX` by canonical id; `--exclude-re REGEX` by path, applies to every mode.
-- `--max-chars N` output budget in bytes, default 8000; `--max-tokens N` the same in tokens.
-- `--include-tools` / `--include-skill-bodies` lift the default exclusions.
-- `--json` machine-readable, same budget and truncation as text.
-- `--self-test` verify against a built-in synthetic corpus; run it after copying the skill anywhere.
+`node session-grep.mjs --help` lists every flag with its argument and default. The ones
+whose reason is not in that line:
+
+- `--include-tools` / `--include-skill-bodies` lift the default exclusions described under
+  Semantics; message indexes depend on them, so drill in with the setting the search used.
+- `--role assistant` is the lever against user-side wrappers and review prompts (see
+  Semantics).
+- `--target-root DIR` and `--target-type` keep the configured `{ type, root }` parser
+  mapping; `--root DIR` is an untyped one-off whose format is auto-detected, and it cannot
+  be combined with `--sources-file`.
+- `--exclude-re` applies to every mode, so a wrapper can enforce a path blacklist;
+  `--exclude-session` follows canonical ids rather than filenames.
+- `--self-test` after copying the skill anywhere.

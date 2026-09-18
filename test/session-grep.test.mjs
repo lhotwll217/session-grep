@@ -419,7 +419,7 @@ test('--target-type scopes raw_files_with_hits to the searched scope (issue #19)
       [GREP, '--query', 'scope19needle', '--target-type', 'codex', '--root', root],
       { encoding: 'utf8' },
     );
-    assert.match(text, /raw_files_with_hits=0/);
+    assert.match(text, /files_with_matches=0/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
