@@ -332,10 +332,14 @@ for (const file of files) {
   if (targetTypes.size && !targetTypes.has(source)) continue;
   let raw;
   try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
-  const messages = parseMessages(raw, source);
+  const records = parseRecords(raw);
+  const messages = messagesFrom(records, source);
   let fileMtime = null; // timestamp fallback, one stat per file not per message
   const mtime = () => (fileMtime ??= fs.statSync(file).mtimeMs);
   const baseHitsBefore = matches.length;
+  // Fork/resume descendants replay the ancestor's prefix, so they share message 0.
+  // Unrelated sessions that merely repeat a common line do not.
+  const opening = normalizeForKey(messages[0]?.text ?? '');
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (opts.role !== 'all' && msg.role !== opts.role) continue;
@@ -365,6 +369,7 @@ for (const file of files) {
       timestamp: msg.timestamp,
       time,
       dl,
+      opening,
       ...(anyWords ? { matchedWords: hitWords, termFreq } : {}),
       before: messages.slice(Math.max(0, i - opts.before), i),
       match: msg,
@@ -377,11 +382,11 @@ for (const file of files) {
   const baseHits = matches.length - baseHitsBefore;
   if (!opts.includeTools || !opts.includeSkillBodies) {
     const toolsLifted = countMatching(
-      parseMessages(raw, source, { includeTools: true }), mtime);
+      messagesFrom(records, source, { includeTools: true }), mtime);
     if (!opts.includeTools) toolsExcluded += Math.max(0, toolsLifted - baseHits);
     if (!opts.includeSkillBodies) {
       const allLifted = countMatching(
-        parseMessages(raw, source, { includeTools: true, includeSkillBodies: true }), mtime);
+        messagesFrom(records, source, { includeTools: true, includeSkillBodies: true }), mtime);
       skillBodiesExcluded += Math.max(0, allLifted - Math.max(toolsLifted, baseHits));
     }
   }
@@ -484,7 +489,12 @@ const matchPreviewChars = (entry) => Math.max(
 );
 const matchNeedle = (entry) => {
   if (anyWords && entry.matchedWords?.length) {
-    return entry.matchedWords.reduce((best, w) => (wordDf[w] <= wordDf[best] ? w : best));
+    // --candidates carries the session's union of matched words, which may include
+    // words absent from the BEST message. Centre on one the text actually contains.
+    const hay = opts.caseSensitive ? entry.match.text : entry.match.text.toLowerCase();
+    const present = entry.matchedWords.filter((w) => hay.includes(w));
+    const pool = present.length ? present : entry.matchedWords;
+    return pool.reduce((best, w) => (wordDf[w] <= wordDf[best] ? w : best));
   }
   if (opts.regex && queryRegex) {
     const found = queryRegex.exec(entry.match.text);
@@ -647,12 +657,17 @@ function countOccurrences(haystack, word) {
   return n;
 }
 
+function normalizeForKey(text) {
+  const norm = text.replace(/\s+/g, ' ').trim();
+  return opts.caseSensitive ? norm : norm.toLowerCase();
+}
+
 function contentKey(match) {
-  const norm = match.match.text.replace(/\s+/g, ' ').trim();
-  const text = opts.caseSensitive ? norm : norm.toLowerCase();
   // Source is part of the key: the same sentence in Claude vs Codex is two
-  // transcripts, not a resume. Fork/resume copies share a parser.
-  return `${match.source}\0${text}`;
+  // transcripts, not a resume. Fork/resume copies share a parser. The session's
+  // opening message is part of it too, so two unrelated sessions that happen to
+  // repeat one common line stay separate results instead of collapsing.
+  return `${match.source}\0${match.opening ?? ''}\0${normalizeForKey(match.match.text)}`;
 }
 
 function collapseForks(ranked, cmp) {
@@ -717,19 +732,32 @@ function reduceSkillBody(msg) {
   return msg;
 }
 
-function parseMessages(raw, source, overrides = {}) {
-  const includeTools = overrides.includeTools ?? opts.includeTools;
-  const includeSkillBodies = overrides.includeSkillBodies ?? opts.includeSkillBodies;
+// JSON.parse dominates the cost on multi-MB transcripts, and the excluded-match
+// recount needs the same lines under different exclusion settings. Parse once per
+// file, then build each view from the records in hand.
+function parseRecords(raw) {
   const out = [];
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
-    let obj;
-    try { obj = JSON.parse(line); } catch { continue; }
+    try { out.push(JSON.parse(line)); } catch { continue; }
+  }
+  return out;
+}
+
+function messagesFrom(records, source, overrides = {}) {
+  const includeTools = overrides.includeTools ?? opts.includeTools;
+  const includeSkillBodies = overrides.includeSkillBodies ?? opts.includeSkillBodies;
+  const out = [];
+  for (const obj of records) {
     const msg = ADAPTERS[source].message(obj, { includeTools });
     if (!msg || !msg.text.trim()) continue;
     out.push(includeSkillBodies ? msg : reduceSkillBody(msg));
   }
   return out;
+}
+
+function parseMessages(raw, source, overrides = {}) {
+  return messagesFrom(parseRecords(raw), source, overrides);
 }
 
 // Predicate shared by the visible search and the excluded-match recount below:

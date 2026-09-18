@@ -122,9 +122,11 @@ when several hits compete, each is capped to one-third of the budget (otherwise 
 fair share) and selection stops at the first hit that does not fit — so raising
 `--max-chars` only ever ADDS hits or lengthens previews (safe retry). An oversized
 match is truncated around the matching span, not from the start, so the hit stays
-visible. (2) Identical match text from forked/resumed sessions collapses onto the
-earliest copy, with `+N forked copies` on that pointer, so the budget is not spent
-replaying one message. (3) Under a near-floor budget the `word_hits` table is
+visible. (2) Fork/resume descendants replay their
+ancestor's prefix, so a copy is identified by matching BOTH the session's opening
+message and the match text; such copies collapse onto the earliest one, with `+N
+forked copies` on that pointer. Unrelated sessions that merely repeat a common line
+stay separate hits. (3) Under a near-floor budget the `word_hits` table is
 dropped before any evidence is — metadata is advisory and comes back on a
 bigger-budget re-run. (4) As a last resort the sole shown hit may have its context
 shed, text shrunk, and path visibly truncated (`...`); the `id`/`idx` pointer
