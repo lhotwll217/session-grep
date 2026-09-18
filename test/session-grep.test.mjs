@@ -352,3 +352,82 @@ test('typed sources file supports target root and target type narrowing', { skip
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('--target-type scopes raw_files_with_hits to the searched scope (issue #19)', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    mkdirSync(join(root, 'proj'), { recursive: true });
+    mkdirSync(join(root, 'codex'), { recursive: true });
+    writeFileSync(
+      join(root, 'proj', 'aaaa.jsonl'),
+      claudeLine('user', 'SCOPE19NEEDLE lives in the claude transcript', '2026-06-01T10:00:00Z'),
+    );
+    writeFileSync(
+      join(root, 'codex', 'rollout-zzzz.jsonl'),
+      codexLine('assistant', 'unrelated codex chatter', '2026-06-01T10:00:00Z'),
+    );
+
+    const scopedOut = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'scope19needle', '--target-type', 'codex', '--root', root, '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(scopedOut.totalMatches, 0);
+    assert.equal(scopedOut.rawFilesWithHits, 0, 'prefilter files of excluded types must not be counted');
+
+    const unscoped = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'scope19needle', '--root', root, '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(unscoped.totalMatches, 1);
+    assert.equal(unscoped.rawFilesWithHits, 1);
+
+    const text = execFileSync(
+      process.execPath,
+      [GREP, '--query', 'scope19needle', '--target-type', 'codex', '--root', root],
+      { encoding: 'utf8' },
+    );
+    assert.match(text, /raw_files_with_hits=0/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('--target-root accepts a subdirectory and inherits the configured type (issue #20)', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    const store = join(root, 'store');
+    const projA = join(store, 'projA');
+    const projB = join(store, 'projB');
+    mkdirSync(projA, { recursive: true });
+    mkdirSync(projB, { recursive: true });
+    writeFileSync(join(projA, 'aaaa.jsonl'), claudeLine('user', 'SUBROOT20NEEDLE in project A', '2026-06-01T10:00:00Z'));
+    writeFileSync(join(projB, 'bbbb.jsonl'), claudeLine('user', 'unrelated project B chatter', '2026-06-01T10:00:00Z'));
+    const sourcesFile = join(root, 'sources.json');
+    writeFileSync(sourcesFile, JSON.stringify([{ type: 'claude', root: store }]));
+
+    const sub = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--sources-file', sourcesFile, '--target-root', projA, '--query', 'subroot20needle', '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(sub.totalMatches, 1);
+    assert.equal(sub.matches[0].source, 'claude', 'subdirectory inherits the containing root type');
+
+    const excluded = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--sources-file', sourcesFile, '--target-root', projB, '--query', 'subroot20needle', '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(excluded.totalMatches, 0);
+
+    const outside = spawnSync(process.execPath,
+      [GREP, '--sources-file', sourcesFile, '--target-root', join(tmpdir(), 'session-grep-definitely-outside'), '--query', 'x'],
+      { encoding: 'utf8' });
+    assert.equal(outside.status, 1);
+    assert.match(outside.stderr, /did not match any configured roots/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

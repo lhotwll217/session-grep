@@ -172,12 +172,27 @@ if (sourceMap.configError) {
   console.error(`session-grep: warning: SESSION_GREP_SOURCES_FILE ${sourceMap.configPath} ${why} — using built-in defaults (see --list-roots)`);
 }
 if (opts.targetRoots.length) {
-  const wanted = new Set(opts.targetRoots.map((root) => path.resolve(expandHome(root))));
-  const filtered = sourceMap.roots.filter((entry) => wanted.has(path.resolve(entry.root)));
-  if (!filtered.length) {
+  const wanted = opts.targetRoots.map((root) => path.resolve(expandHome(root)));
+  const narrowed = [];
+  const seen = new Set();
+  for (const w of wanted) {
+    let best = null;
+    let bestLen = -1;
+    for (const entry of sourceMap.roots) {
+      const r = path.resolve(entry.root);
+      if (w === r || w.startsWith(r + path.sep)) {
+        if (r.length > bestLen) { best = entry; bestLen = r.length; }
+      }
+    }
+    if (best) {
+      const key = `${best.type}\0${w}`;
+      if (!seen.has(key)) { seen.add(key); narrowed.push({ type: best.type, root: w }); }
+    }
+  }
+  if (!narrowed.length) {
     usage(1, `--target-root did not match any configured roots. Known roots: ${sourceMap.roots.map((entry) => entry.root).join(', ')}`);
   }
-  sourceMap = { ...sourceMap, roots: filtered };
+  sourceMap = { ...sourceMap, roots: narrowed };
 }
 const roots = sourceMap.roots.map((entry) => entry.root).filter((dir) => fs.existsSync(dir));
 if (opts.listRoots) {
@@ -287,6 +302,10 @@ if (rg.status === 2 && opts.regex) {
 // rg enumerates files in nondeterministic (parallel-walk) order; sort so identical
 // invocations rank ties identically.
 files = files.filter((f) => !isExcluded(f) && !isExcludedSession(f)).sort();
+// --target-type narrows the searched scope, so the prefilter list is narrowed before
+// the header is computed: raw_files_with_hits must describe files actually searched,
+// not files counted then skipped in the match loop.
+if (targetTypes.size) files = files.filter((f) => targetTypes.has(sourceOf(f)));
 const matches = [];
 const q = opts.caseSensitive ? opts.query : opts.query.toLowerCase();
 // --any rarity stats: document frequency per word across scanned messages. Rare words
@@ -1102,6 +1121,21 @@ async function selfTest() {
     check('--target-root narrows to configured root and keeps parser mapping', targetedPi.totalMatches === 1 && targetedPi.matches[0].source === 'pi');
     const targetedMiss = JSON.parse(runRaw(['--query', 'relocatedsource', '--json', '--sources-file', sourcesFile, '--target-root', path.join(dir, 'relocated-pi')]));
     check('--target-root excludes other configured roots', targetedMiss.totalMatches === 0);
+    // Issue #20: a subdirectory of a configured root narrows to that subdirectory and
+    // inherits its parser type; a path under no configured root still fails closed.
+    fs.mkdirSync(path.join(dir, 'moved', 'subproj'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'moved', 'subproj', 'sub00001.jsonl'),
+      line('assistant', text('SUBROOTMARKER scoped to one project'), '2026-06-09T09:00:00Z'));
+    const targetedSub = JSON.parse(runRaw(['--query', 'SUBROOTMARKER', '--json', '--sources-file', sourcesFile, '--target-root', path.join(dir, 'moved', 'subproj')]));
+    check('--target-root subdirectory inherits configured type', targetedSub.totalMatches === 1 && targetedSub.matches[0].source === 'claude');
+    const targetedSubMiss = JSON.parse(runRaw(['--query', 'movedclaude', '--json', '--sources-file', sourcesFile, '--target-root', path.join(dir, 'moved', 'subproj')]));
+    check('--target-root subdirectory excludes sibling files', targetedSubMiss.totalMatches === 0);
+    const targetedOutside = spawnSync(process.execPath, [self, '--query', 'x', '--sources-file', sourcesFile, '--target-root', path.join(os.tmpdir(), 'session-grep-outside-root')], { encoding: 'utf8' });
+    check('--target-root outside configured roots fails closed', targetedOutside.status === 1 && targetedOutside.stderr.includes('--target-root did not match any configured roots'));
+    // Issue #19: raw_files_with_hits describes the scope actually searched, not the
+    // prefilter total across excluded types.
+    const scopedCount = JSON.parse(runRaw(['--query', 'zorptastic', '--json', '--sources-file', sourcesFile, '--target-type', 'claude']));
+    check('--target-type scopes raw_files_with_hits', scopedCount.totalMatches === 0 && scopedCount.rawFilesWithHits === 0);
     const missingExplicit = spawnSync(process.execPath, [self, '--list-roots', '--sources-file', path.join(dir, 'missing_sources.json')], { encoding: 'utf8' });
     check('missing explicit --sources-file fails closed', missingExplicit.status === 1 && missingExplicit.stderr.includes('--sources-file') && !missingExplicit.stdout.includes('origin='));
     const rootAndSources = spawnSync(process.execPath, [self, '--query', 'x', '--root', dir, '--sources-file', sourcesFile], { encoding: 'utf8' });
