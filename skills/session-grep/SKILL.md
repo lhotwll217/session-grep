@@ -217,12 +217,14 @@ For scoped chronology, compare `total_message_matches` with `shown`. If evidence
 omitted, stay inside the same session and reduce `--before`/`--after`, use `--sort oldest`,
 or raise the aperture before drawing a complete timeline.
 
-Excluded-content accounting: zero-hit and thin results report matches hidden behind the
-default exclusions — `tools_excluded=N (add --include-tools)` /
+Excluded-content accounting: zero-hit and thin results (fewer hits than `--limit`)
+report matches hidden behind the default exclusions — `tools_excluded=N (add --include-tools)` /
 `skill_excluded=N (add --include-skill-bodies)` in the text header,
 `excluded: { tools, skillBodies }` in JSON — whenever non-zero, with the zero-hit hint
 naming the flag too. `total_message_matches` counts visible hits only, so a zero there
-plus an excluded count means "re-run with the flag", not "absent from the corpus".
+plus an excluded count means "re-run with the flag", not "absent from the corpus". A
+result that fills `--limit` carries no counter: tool output is ~45% of every corpus, so
+the hidden count there is a constant, not a signal, and it is not computed.
 
 Summarize the hits; do not paste long transcript blocks. Give source, id/path, timestamp,
 and the compact context needed to understand what happened around the match.

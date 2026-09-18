@@ -319,8 +319,9 @@ const literalMultiword = !opts.any && !opts.regex && opts.query.trim().split(/\s
 const wordDf = anyWords ? Object.fromEntries(anyWords.map((w) => [w, 0])) : null;
 let messagesScanned = 0;
 // Excluded-match accounting (#22): per-exclusion extra hits hiding behind the
-// default filters, counted over the same prefilter-eligible files. Extensible by
-// construction — a new content exclusion adds one recount stage and one key here.
+// default filters, counted after ranking and only for thin results (see below).
+// Extensible by construction — a new content exclusion adds one recount stage and
+// one key here.
 let toolsExcluded = 0;
 let skillBodiesExcluded = 0;
 let textLenSum = 0;
@@ -336,7 +337,6 @@ for (const file of files) {
   const messages = messagesFrom(records, source);
   let fileMtime = null; // timestamp fallback, one stat per file not per message
   const mtime = () => (fileMtime ??= fs.statSync(file).mtimeMs);
-  const baseHitsBefore = matches.length;
   // Fork/resume descendants replay the ancestor's prefix, so they share message 0.
   // Unrelated sessions that merely repeat a common line do not.
   const opening = normalizeForKey(messages[0]?.text ?? '');
@@ -376,20 +376,6 @@ for (const file of files) {
       after: messages.slice(i + 1, i + 1 + opts.after),
     });
   }
-  // Recount with exclusions lifted, one stage per exclusion so the signal stays
-  // attributable. Runs only over prefilter-eligible files already in hand (raw is
-  // reused, no second corpus pass) and only for exclusions actually in effect.
-  const baseHits = matches.length - baseHitsBefore;
-  if (!opts.includeTools || !opts.includeSkillBodies) {
-    const toolsLifted = countMatching(
-      messagesFrom(records, source, { includeTools: true }), mtime);
-    if (!opts.includeTools) toolsExcluded += Math.max(0, toolsLifted - baseHits);
-    if (!opts.includeSkillBodies) {
-      const allLifted = countMatching(
-        messagesFrom(records, source, { includeTools: true, includeSkillBodies: true }), mtime);
-      skillBodiesExcluded += Math.max(0, allLifted - Math.max(toolsLifted, baseHits));
-    }
-  }
 }
 
 // With --any, rank by BM25 over the per-run df table: IDF plus term-frequency
@@ -426,6 +412,31 @@ const collapsed = collapseForks(matches, byRank);
 const candidates = opts.candidates ? groupCandidates(collapsed) : null;
 const rankedEntries = candidates ?? collapsed;
 const limited = rankedEntries.slice(0, opts.limit);
+
+// Excluded-match accounting (#22) is only actionable on a thin result: a zero or
+// under-filled set is where "absent from the corpus" and "hidden behind a flag"
+// look identical. A result that already fills --limit gets no recount, because the
+// hidden count is a corpus-wide constant there (tool output is ~45% of bytes) and
+// the recount would re-parse every prefilter-eligible file to report it.
+if (rankedEntries.length < opts.limit && (!opts.includeTools || !opts.includeSkillBodies)) {
+  for (const file of files) {
+    const source = sourceOf(file);
+    let raw;
+    try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    const records = parseRecords(raw);
+    let fileMtime = null;
+    const mtime = () => (fileMtime ??= fs.statSync(file).mtimeMs);
+    // One stage per exclusion so the signal stays attributable.
+    const base = countMatching(messagesFrom(records, source), mtime);
+    const toolsLifted = countMatching(messagesFrom(records, source, { includeTools: true }), mtime);
+    if (!opts.includeTools) toolsExcluded += Math.max(0, toolsLifted - base);
+    if (!opts.includeSkillBodies) {
+      const allLifted = countMatching(
+        messagesFrom(records, source, { includeTools: true, includeSkillBodies: true }), mtime);
+      skillBodiesExcluded += Math.max(0, allLifted - Math.max(toolsLifted, base));
+    }
+  }
+}
 
 // Zero hits should steer the next query, not dead-end the agent: multi-word literal
 // phrases almost never occur verbatim in transcripts — say so and point at --any.

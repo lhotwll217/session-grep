@@ -113,3 +113,15 @@ test('new signals respect the --max-chars ceiling', { skip }, () => {
     assert.ok(Buffer.byteLength(out) <= 500, `${args.join(' ')}: ${Buffer.byteLength(out)} bytes`);
   }
 });
+
+// #22 cost: a result that already fills --limit gets no excluded-match recount. The
+// hidden count is a corpus-wide constant there, and computing it re-parses every
+// prefilter-eligible file. Thin results (under --limit) still report it.
+test('busy result carries no excluded counter; thin result does', { skip }, () => {
+  const busy = runJson(['--query', 'THINNEEDLE', '--limit', '1']);
+  assert.equal(busy.totalMatches, 1);
+  assert.equal(busy.excluded, undefined);
+  const thin = runJson(['--query', 'THINNEEDLE', '--limit', '2']);
+  assert.equal(thin.totalMatches, 1);
+  assert.equal(thin.excluded.tools, 1);
+});
