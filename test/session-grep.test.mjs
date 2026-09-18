@@ -429,10 +429,14 @@ test('forked copies of the same message spend one budget slot', { skip: !hasRg &
   const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
   try {
     mkdirSync(join(root, 'proj'), { recursive: true });
+    // A resume replays the ancestor's prefix, so every copy repeats the opening turn
+    // before the shared message. That replay is what identifies them as copies.
     const shared = 'FORKNEEDLE: I confirmed where the form-fill event is emitted and where tool results loop back.';
-    writeFileSync(join(root, 'proj', 'ancestor.jsonl'), claudeLine('assistant', shared, '2026-04-06T21:26:18Z'));
-    writeFileSync(join(root, 'proj', 'resume1.jsonl'), claudeLine('assistant', shared, '2026-04-10T17:29:13Z'));
-    writeFileSync(join(root, 'proj', 'resume2.jsonl'), claudeLine('assistant', `  ${shared}  `, '2026-04-10T17:29:19Z'));
+    const opening = 'Trace where the form-fill event is emitted';
+    const replay = (body, ts) => claudeLine('user', opening, ts) + claudeLine('assistant', body, ts);
+    writeFileSync(join(root, 'proj', 'ancestor.jsonl'), replay(shared, '2026-04-06T21:26:18Z'));
+    writeFileSync(join(root, 'proj', 'resume1.jsonl'), replay(shared, '2026-04-10T17:29:13Z'));
+    writeFileSync(join(root, 'proj', 'resume2.jsonl'), replay(`  ${shared}  `, '2026-04-10T17:29:19Z'));
     writeFileSync(join(root, 'proj', 'other.jsonl'), claudeLine('assistant', 'FORKNEEDLE in a distinct later decision UNIQUEFORK', '2026-04-11T09:00:00Z'));
 
     const out = JSON.parse(execFileSync(
@@ -445,7 +449,7 @@ test('forked copies of the same message spend one budget slot', { skip: !hasRg &
     const ancestor = out.matches.find((match) => match.id === 'ancestor');
     assert.ok(ancestor, 'the earliest copy is the shown pointer');
     assert.equal(ancestor.forkCopies, 2);
-    assert.equal(ancestor.index, 0);
+    assert.equal(ancestor.index, 1);
     assert.ok(out.matches.some((match) => match.match.text.includes('UNIQUEFORK')));
     assert.ok(!out.matches.some((match) => match.id === 'resume1' || match.id === 'resume2'));
 

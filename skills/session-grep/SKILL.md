@@ -90,9 +90,10 @@ omitted with a notice. Four trade-offs enforce it. (1) Selection is a strict ran
 prefix: competing hits are each capped to one-third of the budget and selection stops at
 the first that does not fit, so raising `--max-chars` only adds hits or lengthens
 previews. An oversized match is truncated around the matching span so the hit stays
-visible. (2) Fork/resume descendants replay their ancestor's prefix, so a copy is one
-that matches BOTH the session's opening message and the match text; copies collapse
-onto the earliest, and unrelated sessions repeating a common line stay separate.
+visible. (2) Fork/resume descendants replay their ancestor's prefix, so a copy is one whose
+messages BEFORE the hit are identical, and whose hit text is identical; copies collapse
+onto the earliest. Sessions that merely repeat a common line stay separate, and a hit at
+index 0 never collapses because nothing was replayed before it.
 (3) Near the floor, the `word_hits` table is dropped before any evidence. (4) As a last
 resort the sole shown hit sheds context and truncates its path (`...`); the `id`/`idx`
 pointer always stays valid. These degradations engage only near the 500-byte floor.
