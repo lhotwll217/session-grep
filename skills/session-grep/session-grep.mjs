@@ -14,40 +14,52 @@ function expandHome(p) {
 }
 
 const args = process.argv.slice(2);
+const DAY_MS = 24 * 60 * 60 * 1000;
 const opts = { limit: 20, before: 1, after: 1, role: 'all', sort: 'newest', json: false, regex: false, roots: [], targetTypes: [], targetRoots: [], excludeRe: [], excludeSessions: [], maxChars: 8000 };
+// [flag, argument or null, description, apply] — the parser and --help share it.
+const FLAGS = [
+  ['--query', 'TEXT', 'literal query, or a JavaScript regex with --regex; the text may itself begin with dashes', (v) => { opts.query = v; }],
+  ['--any', null, 'match ANY query word (whitespace or | delimit terms); BM25-ranked, per-word hit counts reported', () => { opts.any = true; }],
+  ['--candidates', null, 'group hits by session before --limit/--max-chars; one best pointer per session', () => { opts.candidates = true; }],
+  ['--regex', null, 'treat --query as a JavaScript regex; case-insensitive unless --case-sensitive', () => { opts.regex = true; }],
+  ['--session', 'ID_PREFIX', 'scope a query to one session; with --at, open the messages around one index', (v) => { opts.session = v; }],
+  ['--at', 'INDEX', 'with --session: the message index to open, from a hit\'s idx= (±5 messages by default)', (v) => { opts.at = Number(v); }],
+  ['--focus', 'TEXT', 'with --session/--at: centre the opened message\'s preview on this text instead of its start', (v) => { opts.focus = v; }],
+  ['--overview', null, 'no query: one compact digest per session', () => { opts.overview = true; }],
+  ['--skim', 'ID_PREFIX', 'no query: one session\'s conversation, head/tail kept, middle sampled', (v) => { opts.skim = v; }],
+  ['--list-roots', null, 'print the configured source/root map and whether each root exists', () => { opts.listRoots = true; }],
+  ['--limit', 'N', 'max matching messages (sessions with --candidates), default 20', (v) => { opts.limit = Number(v); }],
+  ['--before', 'N', 'messages before each hit, default 1 (5 in --session/--at)', (v) => { opts.before = Number(v); opts.beforeSet = true; }],
+  ['--after', 'N', 'messages after each hit, default 1 (5 in --session/--at)', (v) => { opts.after = Number(v); opts.afterSet = true; }],
+  ['--role', 'user|assistant|all', 'filter matching messages, default all', (v) => { opts.role = v; }],
+  ['--since', 'today|Nd|YYYY-MM-DD', 'only messages at or after this time', (v) => { opts.since = v; }],
+  ['--until', 'today|Nd|YYYY-MM-DD', 'upper bound on message time, inclusive of the day or period named', (v) => { opts.until = v; }],
+  ['--sort', 'newest|oldest|file', 'output order, default newest (--any ranks by score first)', (v) => { opts.sort = v; }],
+  ['--target-type', 'claude|codex|pi|all', 'narrow to parser/source types (repeatable)', (v) => { opts.targetTypes.push(v); }],
+  ['--source', 'claude|codex|pi|all', 'alias for --target-type', (v) => { opts.targetTypes.push(v); }],
+  ['--root', 'DIR', 'search this directory of *.jsonl transcripts instead of the defaults; untyped, format auto-detected (repeatable)', (v) => { opts.roots.push(v); }],
+  ['--sources-file', 'FILE', 'JSON array of typed { type, root } sources, replacing the defaults', (v) => { opts.sourcesFile = v; }],
+  ['--target-root', 'DIR', 'narrow configured sources to this root or a subdirectory of one, keeping its type (repeatable)', (v) => { opts.targetRoots.push(v); }],
+  ['--exclude-session', 'ID_PREFIX', 'exclude a session by canonical id (repeatable)', (v) => { opts.excludeSessions.push(v); }],
+  ['--exclude-re', 'REGEX', 'exclude session files whose path matches this JavaScript regex; every mode (repeatable)', (v) => { opts.excludeRe.push(v); }],
+  ['--max-chars', 'BYTES', 'output budget, default 8000, minimum 500; a hard ceiling on rendered output', (v) => { opts.maxChars = Number(v); opts.maxCharsSet = true; }],
+  ['--max-tokens', 'N', 'the same budget in tokens (4 bytes ≈ 1 token)', (v) => { opts.maxChars = Number(v) * 4; opts.maxCharsSet = true; }],
+  ['--include-tools', null, 'also match inside tool calls and results (excluded by default)', () => { opts.includeTools = true; }],
+  ['--include-skill-bodies', null, 'also match inside injected slash-command skill bodies (excluded by default)', () => { opts.includeSkillBodies = true; }],
+  ['--case-sensitive', null, 'exact case match', () => { opts.caseSensitive = true; }],
+  ['--json', null, 'machine-readable output; same budget and truncation as text', () => { opts.json = true; }],
+  ['--self-test', null, 'verify this copy against a built-in synthetic corpus', () => { opts.selfTest = true; }],
+  ['--help', null, 'print this help', () => usage(0)],
+];
+const FLAG_INDEX = new Map(FLAGS.map((f) => [f[0], f]));
 for (let i = 0; i < args.length; i++) {
-  const a = args[i];
-  if (a === '--query') opts.query = args[++i];
-  else if (a === '--limit') opts.limit = Number(args[++i]);
-  else if (a === '--before') { opts.before = Number(args[++i]); opts.beforeSet = true; }
-  else if (a === '--after') { opts.after = Number(args[++i]); opts.afterSet = true; }
-  else if (a === '--role') opts.role = args[++i];
-  else if (a === '--target-type') opts.targetTypes.push(args[++i]);
-  else if (a === '--source') opts.targetTypes.push(args[++i]);
-  else if (a === '--since') opts.since = args[++i];
-  else if (a === '--include-skill-bodies') opts.includeSkillBodies = true;
-  else if (a === '--sort') opts.sort = args[++i];
-  else if (a === '--root') opts.roots.push(args[++i]);
-  else if (a === '--sources-file') opts.sourcesFile = args[++i];
-  else if (a === '--target-root') opts.targetRoots.push(args[++i]);
-  else if (a === '--exclude-re') opts.excludeRe.push(args[++i]);
-  else if (a === '--exclude-session') opts.excludeSessions.push(args[++i]);
-  else if (a === '--max-chars') { opts.maxChars = Number(args[++i]); opts.maxCharsSet = true; }
-  else if (a === '--max-tokens') { opts.maxChars = Number(args[++i]) * 4; opts.maxCharsSet = true; }
-  else if (a === '--overview') opts.overview = true;
-  else if (a === '--skim') opts.skim = args[++i];
-  else if (a === '--session') opts.session = args[++i];
-  else if (a === '--at') opts.at = Number(args[++i]);
-  else if (a === '--list-roots') opts.listRoots = true;
-  else if (a === '--self-test') opts.selfTest = true;
-  else if (a === '--include-tools') opts.includeTools = true;
-  else if (a === '--any') opts.any = true;
-  else if (a === '--candidates') opts.candidates = true;
-  else if (a === '--regex') opts.regex = true;
-  else if (a === '--case-sensitive') opts.caseSensitive = true;
-  else if (a === '--json') opts.json = true;
-  else if (a === '--help' || a === '-h') usage(0);
-  else usage(1, `Unknown arg: ${a}`);
+  const a = args[i] === '-h' ? '--help' : args[i];
+  const flag = FLAG_INDEX.get(a);
+  if (!flag) usage(1, `Unknown arg: ${a}`);
+  const [, arg, , apply] = flag;
+  if (!arg) apply();
+  else if (i + 1 >= args.length) usage(1, `${a} requires ${arg}`);
+  else apply(args[++i]);
 }
 
 // ─── FORMAT ADAPTERS ────────────────────────────────────────────────────────
@@ -99,6 +111,10 @@ for (const type of targetTypes) {
 if (!['newest', 'oldest', 'file'].includes(opts.sort)) usage(1, '--sort must be newest, oldest, or file');
 const sinceTime = opts.since ? parseSince(opts.since) : null;
 if (opts.since && sinceTime == null) usage(1, '--since must be today, Nd, or YYYY-MM-DD');
+const untilTime = opts.until ? parseUntil(opts.until) : null;
+if (opts.until && untilTime == null) usage(1, '--until must be today, Nd, or YYYY-MM-DD');
+if (sinceTime != null && untilTime != null && untilTime <= sinceTime) usage(1, '--until must be later than --since');
+if (opts.focus != null && !(opts.session && opts.at != null)) usage(1, '--focus requires --session ID_PREFIX --at INDEX');
 if (opts.any && opts.regex) usage(1, '--any and --regex cannot be combined');
 if (opts.candidates && !opts.query) usage(1, '--candidates requires --query');
 if (opts.excludeSessions.some((id) => typeof id !== 'string' || !id.trim())) usage(1, '--exclude-session requires a non-empty ID prefix');
@@ -129,8 +145,8 @@ function bytes(s) {
 }
 
 // --any: multi-word phrases rarely occur verbatim in transcripts, so match ANY word
-// and rank by how many distinct words a message hits. Low-signal words are dropped
-// from the word set so common glue doesn't dominate the ranking.
+// and rank with BM25 over per-run df (rarity, saturated TF, length). Low-signal
+// words are dropped from the word set so common glue doesn't dominate the ranking.
 const STOPWORDS = new Set(['the', 'and', 'was', 'were', 'did', 'does', 'you', 'your', 'why', 'how', 'what', 'when', 'where', 'which', 'who', 'for', 'that', 'this', 'with', 'from', 'have', 'has', 'had', 'are', 'not', 'but', 'about', 'into', 'out', 'our', 'they', 'them', 'then', 'than', 'its', 'get', 'got', 'can', 'could', 'would', 'should', 'ever', 'any', 'all', 'some', 'there']);
 let anyWords = null;
 if (opts.any) {
@@ -172,12 +188,27 @@ if (sourceMap.configError) {
   console.error(`session-grep: warning: SESSION_GREP_SOURCES_FILE ${sourceMap.configPath} ${why} — using built-in defaults (see --list-roots)`);
 }
 if (opts.targetRoots.length) {
-  const wanted = new Set(opts.targetRoots.map((root) => path.resolve(expandHome(root))));
-  const filtered = sourceMap.roots.filter((entry) => wanted.has(path.resolve(entry.root)));
-  if (!filtered.length) {
+  const wanted = opts.targetRoots.map((root) => path.resolve(expandHome(root)));
+  const narrowed = [];
+  const seen = new Set();
+  for (const w of wanted) {
+    let best = null;
+    let bestLen = -1;
+    for (const entry of sourceMap.roots) {
+      const r = path.resolve(entry.root);
+      if (w === r || w.startsWith(r + path.sep)) {
+        if (r.length > bestLen) { best = entry; bestLen = r.length; }
+      }
+    }
+    if (best) {
+      const key = `${best.type}\0${w}`;
+      if (!seen.has(key)) { seen.add(key); narrowed.push({ type: best.type, root: w }); }
+    }
+  }
+  if (!narrowed.length) {
     usage(1, `--target-root did not match any configured roots. Known roots: ${sourceMap.roots.map((entry) => entry.root).join(', ')}`);
   }
-  sourceMap = { ...sourceMap, roots: filtered };
+  sourceMap = { ...sourceMap, roots: narrowed };
 }
 const roots = sourceMap.roots.map((entry) => entry.root).filter((dir) => fs.existsSync(dir));
 if (opts.listRoots) {
@@ -219,7 +250,8 @@ if (opts.session && opts.at != null) {
   const available = opts.maxChars - bytes(head) - 1 - 80; // 80: reserve for the truncation notice
   const lineFor = (i, cap) => {
     const m = messages[i];
-    return `[${i}]${i === opts.at ? '*' : ' '} ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${truncate(m.text, cap)}`;
+    const preview = i === opts.at && opts.focus != null ? truncateAround(m.text, cap, opts.focus) : truncate(m.text, cap);
+    return `[${i}]${i === opts.at ? '*' : ' '} ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${preview}`;
   };
   // Reserve the selected message first, then spend what remains on the nearest context.
   // Selection happens before chronological rendering, so a tight budget can never consume
@@ -287,38 +319,59 @@ if (rg.status === 2 && opts.regex) {
 // rg enumerates files in nondeterministic (parallel-walk) order; sort so identical
 // invocations rank ties identically.
 files = files.filter((f) => !isExcluded(f) && !isExcludedSession(f)).sort();
+// --target-type narrows the searched scope, so the prefilter list is narrowed before
+// the header is computed: raw_files_with_hits must describe files actually searched,
+// not files counted then skipped in the match loop.
+if (targetTypes.size) files = files.filter((f) => targetTypes.has(sourceOf(f)));
+if (sinceTime != null) files = filesWrittenSince(files, sinceTime);
 const matches = [];
 const q = opts.caseSensitive ? opts.query : opts.query.toLowerCase();
+// Proactive query-shape signal (#24): a multi-word literal almost never occurs
+// verbatim — surfaced in the header on every result, not just the zero-hit path.
+// Matching semantics are unchanged; this only advises the --any retry earlier.
+const literalMultiword = !opts.any && !opts.regex && opts.query.trim().split(/\s+/).length > 1;
 // --any rarity stats: document frequency per word across scanned messages. Rare words
 // are the signal; the ranking weights them (IDF) and the output reports the counts so
 // the caller learns which of its words are low-signal. Counted AFTER the --role/--since
 // filters so word_hits describes the population the caller actually sees.
 const wordDf = anyWords ? Object.fromEntries(anyWords.map((w) => [w, 0])) : null;
 let messagesScanned = 0;
+let toolsExcluded = 0;
+let skillBodiesExcluded = 0;
+let textLenSum = 0;
+const BM25_K1 = 1.4;
+const BM25_B = 0.75;
 
 for (const file of files) {
   const source = sourceOf(file);
   if (targetTypes.size && !targetTypes.has(source)) continue;
   let raw;
   try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
-  const messages = parseMessages(raw, source);
+  const records = parseRecords(raw);
+  const messages = messagesFrom(records, source);
   let fileMtime = null; // timestamp fallback, one stat per file not per message
   const mtime = () => (fileMtime ??= fs.statSync(file).mtimeMs);
+  const forkFamilyKey = normalizeForKey(messages[0]?.text ?? '');
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (opts.role !== 'all' && msg.role !== opts.role) continue;
     let time = null;
-    if (sinceTime != null) {
+    if (sinceTime != null || untilTime != null) {
       time = timeOf(msg.timestamp) ?? timeOf(messages[0]?.timestamp) ?? mtime();
-      if (time < sinceTime) continue;
+      if (sinceTime != null && time < sinceTime) continue;
+      if (untilTime != null && time >= untilTime) continue;
     }
     messagesScanned++;
+    const dl = Math.max(1, msg.text.length);
+    textLenSum += dl;
     const haystack = opts.caseSensitive ? msg.text : msg.text.toLowerCase();
     let hitWords = null;
+    let termFreq = null;
     if (anyWords) {
       hitWords = anyWords.filter((w) => haystack.includes(w));
       for (const w of hitWords) wordDf[w]++;
       if (!hitWords.length) continue;
+      termFreq = Object.fromEntries(hitWords.map((w) => [w, countOccurrences(haystack, w)]));
     } else if (opts.regex ? !queryRegex.test(msg.text) : !haystack.includes(q)) continue;
     time ??= timeOf(msg.timestamp) ?? timeOf(messages[0]?.timestamp) ?? mtime();
     matches.push({
@@ -328,7 +381,9 @@ for (const file of files) {
       index: i,
       timestamp: msg.timestamp,
       time,
-      ...(anyWords ? { matchedWords: hitWords } : {}),
+      dl,
+      forkFamilyKey,
+      ...(anyWords ? { matchedWords: hitWords, termFreq } : {}),
       before: messages.slice(Math.max(0, i - opts.before), i),
       match: msg,
       after: messages.slice(i + 1, i + 1 + opts.after),
@@ -336,29 +391,65 @@ for (const file of files) {
   }
 }
 
-// With --any, rank by summed word rarity (IDF): a hit on one rare identifier beats a
-// hit on three ubiquitous words. Recency breaks ties, then id/index so equal-time
-// hits from different files order deterministically across runs.
+// With --any, rank by BM25 over the per-run df table: IDF plus term-frequency
+// saturation and length normalization, so a short message about a rare term beats a
+// long one that happens to mention it. Recency breaks remaining ties (newest unless
+// --sort oldest), then id/index so equal-time hits order deterministically.
 const stable = (a, b) => a.id.localeCompare(b.id) || a.index - b.index;
+const recency = (a, b) => (opts.sort === 'oldest' ? a.time - b.time : b.time - a.time);
+const byRank = (a, b) => {
+  if (anyWords) return (b.score ?? 0) - (a.score ?? 0) || recency(a, b) || stable(a, b);
+  if (opts.sort === 'oldest') return a.time - b.time || stable(a, b);
+  if (opts.sort === 'newest') return b.time - a.time || stable(a, b);
+  return 0;
+};
 if (anyWords) {
-  const idf = (w) => Math.log((messagesScanned + 1) / (wordDf[w] + 1));
-  for (const m of matches) m.score = round3(m.matchedWords.reduce((t, w) => t + idf(w), 0));
-  matches.sort((a, b) => b.score - a.score || (opts.sort === 'oldest' ? a.time - b.time : b.time - a.time) || stable(a, b));
-} else if (opts.sort === 'newest') matches.sort((a, b) => b.time - a.time || stable(a, b));
-else if (opts.sort === 'oldest') matches.sort((a, b) => a.time - b.time || stable(a, b));
-const candidates = opts.candidates ? groupCandidates(matches) : null;
-const rankedEntries = candidates ?? matches;
+  const avgdl = textLenSum / Math.max(1, messagesScanned);
+  // Lucene-style positive IDF: a term that hits every scanned message still has
+  // weight, so length normalization can separate a short on-topic hit from a long
+  // mention. log((N+1)/(df+1)) would be 0 in that case and ranking would collapse
+  // to recency.
+  const idf = (w) => Math.log(1 + (messagesScanned - wordDf[w] + 0.5) / (wordDf[w] + 0.5));
+  const tfWeight = (tf, dl) => {
+    const norm = BM25_K1 * (1 - BM25_B + BM25_B * (dl / Math.max(avgdl, 1)));
+    return (tf * (BM25_K1 + 1)) / (tf + norm);
+  };
+  for (const m of matches) {
+    m.score = round3(m.matchedWords.reduce((t, w) => t + idf(w) * tfWeight(m.termFreq[w] || 1, m.dl), 0));
+  }
+}
+matches.sort(byRank);
+// Fork/resume transcripts replay the same message under new session ids. Collapse
+// identical match text onto the earliest copy so the budget buys distinct evidence.
+const collapsed = collapseForks(matches, byRank);
+const candidates = opts.candidates ? groupCandidates(collapsed) : null;
+const rankedEntries = candidates ?? collapsed;
 const limited = rankedEntries.slice(0, opts.limit);
+const filesWithMatches = new Set(matches.map((m) => m.path)).size;
+
+const resultIsThin = rankedEntries.length < opts.limit;
+if (resultIsThin && (!opts.includeTools || !opts.includeSkillBodies)) recountExcludedMatches(files);
 
 // Zero hits should steer the next query, not dead-end the agent: multi-word literal
 // phrases almost never occur verbatim in transcripts — say so and point at --any.
-const hint = !limited.length
-  ? (!opts.any && opts.query.trim().split(/\s+/).length > 1 && !opts.regex
-      ? 'no hits: multi-word phrases rarely occur verbatim in transcripts — retry with --any (matches any word, ranked by words matched), or grep ONE rare term (an identifier, error string, or filename)'
+// When matches hid behind content exclusions, name that lever too (#22): a zero-hit
+// result otherwise reads as "not in the corpus" when the fix is a flag, not a rephrase.
+const excludedPointer = [
+  toolsExcluded > 0 && !opts.includeTools
+    ? `${toolsExcluded} more inside tool blocks — add --include-tools`
+    : null,
+  skillBodiesExcluded > 0 && !opts.includeSkillBodies
+    ? `${skillBodiesExcluded} more inside skill bodies — add --include-skill-bodies`
+    : null,
+].filter(Boolean).join('; ');
+const hintBase = !limited.length
+  ? (literalMultiword
+      ? 'no hits: multi-word phrases rarely occur verbatim in transcripts — retry with --any (matches any word, ranked by rarity and length), or grep ONE rare term (an identifier, error string, or filename)'
       : opts.any
         ? 'no hits for any query word: try different, rarer words (identifiers, error strings, filenames), or loosen --since/--role filters'
         : 'no hits: try a rarer single term, or --any with several candidate words')
   : null;
+const hint = hintBase ? (excludedPointer ? `${hintBase}; ${excludedPointer}` : hintBase) : null;
 
 // Per-word hit counts teach the caller which of its words are low-signal: a word
 // matching thousands of messages contributes nothing — drop it next query.
@@ -370,9 +461,9 @@ const wordStats = anyWords
 // caller's context. The REAL header, word_hits, hint, and omission lines are charged
 // against the budget (not a fixed allowance), then hits are selected in rank order.
 // Two invariants:
-//  - Monotone: entries render at a fixed size for a given invocation shape, so
-//    selection is a strict rank-order prefix — raising the budget can only extend
-//    the emitted set, never reshuffle it.
+//  - Monotone: when several hits compete, each is capped to one-third of the budget
+//    (and otherwise a fair share), so raising --max-chars can only extend the emitted
+//    set or lengthen previews — never reshuffle or evict an earlier hit.
 //  - Evidence outranks metadata: whenever the fixed lines can't fit (zero-hit df
 //    tables included) the word_hits table is dropped, and before returning shown=0
 //    with matches present the top hit is hard-shrunk (text first, path last).
@@ -388,15 +479,30 @@ const CONTEXT_PREVIEW_CHARS = 180;
 const MIN_MATCH_PREVIEW_CHARS = 300;
 const ENTRY_OVERHEAD_CHARS = 220;
 const HEADER_ALLOWANCE_ESTIMATE = 300;
-const entryShare = Math.max(
-  MIN_MATCH_PREVIEW_CHARS,
-  Math.floor((opts.maxChars - HEADER_ALLOWANCE_ESTIMATE) / Math.max(1, limited.length)),
-);
+const competing = Math.max(1, limited.length);
+const fairShare = Math.floor((opts.maxChars - HEADER_ALLOWANCE_ESTIMATE) / competing);
+const maxHitShare = competing > 1
+  ? Math.max(MIN_MATCH_PREVIEW_CHARS, Math.floor(opts.maxChars / 3))
+  : Math.max(MIN_MATCH_PREVIEW_CHARS, opts.maxChars - HEADER_ALLOWANCE_ESTIMATE);
+const entryShare = Math.min(maxHitShare, Math.max(MIN_MATCH_PREVIEW_CHARS, fairShare));
 const matchPreviewChars = (entry) => Math.max(
   MIN_MATCH_PREVIEW_CHARS,
   entryShare - ENTRY_OVERHEAD_CHARS -
     (opts.candidates ? 0 : entry.before.length + entry.after.length) * (CONTEXT_PREVIEW_CHARS + 20),
 );
+const matchNeedle = (entry) => {
+  if (anyWords && entry.matchedWords?.length) {
+    const pool = entry.bestMatchedWords ?? entry.matchedWords;
+    return pool.reduce((best, w) => (wordDf[w] <= wordDf[best] ? w : best));
+  }
+  if (opts.regex && queryRegex) {
+    const found = queryRegex.exec(entry.match.text);
+    queryRegex.lastIndex = 0;
+    return found?.[0] ?? queryPattern;
+  }
+  return opts.query;
+};
+const previewMatch = (entry, room = matchPreviewChars(entry)) => truncateAround(entry.match.text, room, matchNeedle(entry));
 
 function selectWithinBudget(renderLen, budget) {
   const emitted = [];
@@ -421,7 +527,7 @@ function forceOneHit(renderLen, budget) {
         before: [],
         after: [],
         path: pathMax === Infinity ? m.path : truncate(m.path, pathMax),
-        match: { ...m.match, text: truncate(m.match.text, room) },
+        match: { ...m.match, text: previewMatch(m, room) },
       };
       if (renderLen(cand) <= budget) return [cand];
     }
@@ -431,14 +537,18 @@ function forceOneHit(renderLen, budget) {
 
 if (opts.json) {
   const slim = (msg, chars) => ({ role: msg.role, text: truncate(msg.text, chars), timestamp: msg.timestamp });
+  const forks = (m) => (m.forkCopies ? { forkCopies: m.forkCopies } : {});
   const toEntry = opts.candidates
-    ? (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, hitCount: m.hitCount, ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, match: slim(m.match, matchPreviewChars(m)) })
-    : (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, before: m.before.map((message) => slim(message, CONTEXT_PREVIEW_CHARS)), match: slim(m.match, matchPreviewChars(m)), after: m.after.map((message) => slim(message, CONTEXT_PREVIEW_CHARS)) });
+    ? (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, hitCount: m.hitCount, ...forks(m), ...(anyWords ? { matchedWords: m.matchedWords, bestMatchedWords: m.bestMatchedWords, score: m.score } : {}), path: m.path, match: { role: m.match.role, text: previewMatch(m), timestamp: m.match.timestamp } })
+    : (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, ...forks(m), ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, before: m.before.map((message) => slim(message, CONTEXT_PREVIEW_CHARS)), match: { role: m.match.role, text: previewMatch(m), timestamp: m.match.timestamp }, after: m.after.map((message) => slim(message, CONTEXT_PREVIEW_CHARS)) });
   const entryLen = (m) => bytes(JSON.stringify(toEntry(m))) + 1;
   let withStats = !!anyWords;
   // Worst-case envelope (max shown/omitted digits, omission note included, trailing
   // newline) so the real output can only come in at or under the charged size.
-  const envelope = (entriesArr, shown, omitted) => ({ query: queryEcho, ...(scopedSessionFile ? { session: sessionId(scopedSessionFile) } : {}), regex: opts.regex, any: !!opts.any, ...(withStats ? { wordHits: wordDf, messagesScanned } : {}), rawFilesWithHits: files.length, totalMatches: matches.length, ...(candidates ? { totalCandidateSessions: candidates.length } : {}), ...(opts.excludeSessions.length ? { excludedSessions: opts.excludeSessions } : {}), shown, ...(omitted ? { omittedByBudget: omitted, note: OMIT(omitted) } : {}), ...(hint ? { hint } : {}), [opts.candidates ? 'candidates' : 'matches']: entriesArr });
+  const excludedEnvelope = (toolsExcluded > 0 && !opts.includeTools) || (skillBodiesExcluded > 0 && !opts.includeSkillBodies)
+    ? { excluded: { ...(toolsExcluded > 0 && !opts.includeTools ? { tools: toolsExcluded } : {}), ...(skillBodiesExcluded > 0 && !opts.includeSkillBodies ? { skillBodies: skillBodiesExcluded } : {}) } }
+    : {};
+  const envelope = (entriesArr, shown, omitted) => ({ query: queryEcho, ...(scopedSessionFile ? { session: sessionId(scopedSessionFile) } : {}), regex: opts.regex, any: !!opts.any, ...(literalMultiword ? { literalMultiword: true } : {}), ...(withStats ? { wordHits: wordDf, messagesScanned } : {}), rawFilesWithHits: files.length, filesWithMatches, totalMatches: matches.length, ...excludedEnvelope, ...(candidates ? { totalCandidateSessions: candidates.length } : {}), ...(opts.excludeSessions.length ? { excludedSessions: opts.excludeSessions } : {}), shown, ...(omitted ? { omittedByBudget: omitted, note: OMIT(omitted) } : {}), ...(hint ? { hint } : {}), [opts.candidates ? 'candidates' : 'matches']: entriesArr });
   const room = (withOmit) => opts.maxChars - bytes(JSON.stringify(envelope([], limited.length, withOmit ? limited.length : 0))) - 1;
   // A df table that can't fit is dropped even with zero hits — the ceiling binds always.
   if (withStats && room(false) < 0) withStats = false;
@@ -456,23 +566,24 @@ if (opts.json) {
   }
   console.log(JSON.stringify(envelope(emitted.map(toEntry), emitted.length, limited.length - emitted.length)));
 } else {
+  const forkNote = (m) => (m.forkCopies ? ` +${m.forkCopies} forked copies` : '');
   const renderLines = opts.candidates
     ? (m) => [
-        `${m.source} id=${m.id} best_idx=${m.index} hits=${m.hitCount} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] best_score=${m.score}` : ''}`,
+        `${m.source} id=${m.id} best_idx=${m.index} hits=${m.hitCount} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] best_score=${m.score}` : ''}${forkNote(m)}`,
         `path=${m.path}`,
-        `  BEST ${m.match.role}: ${truncate(m.match.text, matchPreviewChars(m))}`,
+        `  BEST ${m.match.role}: ${previewMatch(m)}`,
       ]
     : (m) => [
-        `${m.source} id=${m.id} idx=${m.index} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] score=${m.score}` : ''}`,
+        `${m.source} id=${m.id} idx=${m.index} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] score=${m.score}` : ''}${forkNote(m)}`,
         `path=${m.path}`,
         ...m.before.map((b) => `  before ${b.role}: ${truncate(b.text, CONTEXT_PREVIEW_CHARS)}`),
-        `  MATCH ${m.match.role}: ${truncate(m.match.text, matchPreviewChars(m))}`,
+        `  MATCH ${m.match.role}: ${previewMatch(m)}`,
         ...m.after.map((a) => `  after  ${a.role}: ${truncate(a.text, CONTEXT_PREVIEW_CHARS)}`),
       ];
   // "\n[N] " between entries grows with the hit number — charge the widest it can get.
   const idxOverhead = String(limited.length).length + 4;
   const entryLen = (m) => renderLines(m).reduce((t, l) => t + bytes(l) + 1, idxOverhead);
-  const header = (shown) => `query=${JSON.stringify(queryEcho)}${scopedSessionFile ? ` session=${sessionId(scopedSessionFile)}` : ''}${opts.regex ? ' regex=true' : ''}${opts.any ? ` any=true` : ''}${opts.candidates ? ` candidate_sessions=${candidates.length}` : ''} raw_files_with_hits=${files.length} total_message_matches=${matches.length} shown=${shown} sort=${opts.sort}${opts.since ? ` since=${opts.since}` : ''}${opts.caseSensitive ? ' case_sensitive=true' : ''}${opts.excludeSessions.length ? ` excluded_sessions=[${opts.excludeSessions.join(',')}]` : ''}`;
+  const header = (shown) => `query=${JSON.stringify(queryEcho)}${scopedSessionFile ? ` session=${sessionId(scopedSessionFile)}` : ''}${opts.regex ? ' regex=true' : ''}${opts.any ? ` any=true` : ''}${literalMultiword ? ' literal_multiword=true (retry with --any; literal phrases rarely occur verbatim)' : ''}${opts.candidates ? ` candidate_sessions=${candidates.length}` : ''} files_with_matches=${filesWithMatches} total_message_matches=${matches.length}${toolsExcluded > 0 && !opts.includeTools ? ` tools_excluded=${toolsExcluded} (add --include-tools)` : ''}${skillBodiesExcluded > 0 && !opts.includeSkillBodies ? ` skill_excluded=${skillBodiesExcluded} (add --include-skill-bodies)` : ''} shown=${shown} sort=${opts.sort}${opts.since ? ` since=${opts.since}` : ''}${opts.until ? ` until=${opts.until}` : ''}${opts.caseSensitive ? ' case_sensitive=true' : ''}${opts.excludeSessions.length ? ` excluded_sessions=[${opts.excludeSessions.join(',')}]` : ''}`;
   let wordStatsLine = wordStats ? `word_hits: ${truncate(wordStats, 300)} (of ${messagesScanned} messages searched after filters; high-count words are low-signal — prefer the rare ones)` : null;
   const hintLine = hint ? `hint: ${hint}` : null;
   const room = (withOmit) => opts.maxChars
@@ -520,8 +631,10 @@ function groupCandidates(sortedMatches) {
         time: match.time,
         score: match.score,
         matchedWords: [],
+        ...(match.matchedWords ? { bestMatchedWords: match.matchedWords } : {}),
         hitCount: 0,
         match: match.match,
+        ...(match.forkCopies ? { forkCopies: match.forkCopies } : {}),
       };
       grouped.set(match.id, candidate);
     }
@@ -531,6 +644,87 @@ function groupCandidates(sortedMatches) {
     }
   }
   return [...grouped.values()];
+}
+
+// A message with no timestamp falls back to its file's mtime, so a file last written
+// before the window holds nothing inside it. One stat replaces a full parse.
+// What the default exclusions hid, per exclusion so the caller learns which flag to
+// add. Only a thin result asks for it: a full one hides the same corpus-wide share
+// every time, and answering costs a reparse of every prefilter-eligible file.
+function recountExcludedMatches(candidates) {
+  for (const file of candidates) {
+    const source = sourceOf(file);
+    let raw;
+    try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    const records = parseRecords(raw);
+    let fileMtime = null;
+    const mtime = () => (fileMtime ??= fs.statSync(file).mtimeMs);
+    const visible = countMatching(messagesFrom(records, source), mtime);
+    const toolsLifted = countMatching(messagesFrom(records, source, { includeTools: true }), mtime);
+    if (!opts.includeTools) toolsExcluded += Math.max(0, toolsLifted - visible);
+    if (!opts.includeSkillBodies) {
+      const allLifted = countMatching(
+        messagesFrom(records, source, { includeTools: true, includeSkillBodies: true }), mtime);
+      skillBodiesExcluded += Math.max(0, allLifted - Math.max(toolsLifted, visible));
+    }
+  }
+}
+
+function filesWrittenSince(candidates, cutoff) {
+  return candidates.filter((file) => {
+    try { return fs.statSync(file).mtimeMs >= cutoff; } catch { return false; }
+  });
+}
+
+function countOccurrences(haystack, word) {
+  if (!word) return 0;
+  let n = 0;
+  let i = 0;
+  while ((i = haystack.indexOf(word, i)) !== -1) {
+    n++;
+    i += word.length;
+  }
+  return n;
+}
+
+function normalizeForKey(text) {
+  const norm = text.replace(/\s+/g, ' ').trim();
+  return opts.caseSensitive ? norm : norm.toLowerCase();
+}
+
+function contentKey(match) {
+  // A fork replays its ancestor's prefix, so a copy shares both the parser and the
+  // session's first message. Same sentence under a different opening is a coincidence.
+  return `${match.source}\0${match.forkFamilyKey ?? ''}\0${normalizeForKey(match.match.text)}`;
+}
+
+function collapseForks(ranked, cmp) {
+  const groups = new Map();
+  for (const match of ranked) {
+    const key = contentKey(match);
+    const group = groups.get(key);
+    if (group) group.push(match);
+    else groups.set(key, [match]);
+  }
+  if (groups.size === ranked.length) return ranked;
+  const kept = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      kept.push(group[0]);
+      continue;
+    }
+    let ancestor = group[0];
+    let best = group[0];
+    for (const match of group) {
+      if (match.time < ancestor.time || (match.time === ancestor.time && stable(match, ancestor) < 0)) ancestor = match;
+      if (cmp(match, best) < 0) best = match;
+    }
+    kept.push({ ...ancestor, forkCopies: group.length - 1, score: best.score, rankTime: best.time });
+  }
+  return kept.sort((a, b) => cmp(
+    { ...a, time: a.rankTime ?? a.time },
+    { ...b, time: b.rankTime ?? b.time },
+  ));
 }
 
 function sourceOf(file) {
@@ -566,17 +760,52 @@ function reduceSkillBody(msg) {
   return msg;
 }
 
-function parseMessages(raw, source) {
+// JSON.parse dominates on multi-MB transcripts and every exclusion view needs the
+// same lines, so callers parse once and build each view from the records.
+function parseRecords(raw) {
   const out = [];
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
-    let obj;
-    try { obj = JSON.parse(line); } catch { continue; }
-    const msg = ADAPTERS[source].message(obj, { includeTools: opts.includeTools });
-    if (!msg || !msg.text.trim()) continue;
-    out.push(opts.includeSkillBodies ? msg : reduceSkillBody(msg));
+    try { out.push(JSON.parse(line)); } catch { continue; }
   }
   return out;
+}
+
+function messagesFrom(records, source, overrides = {}) {
+  const includeTools = overrides.includeTools ?? opts.includeTools;
+  const includeSkillBodies = overrides.includeSkillBodies ?? opts.includeSkillBodies;
+  const out = [];
+  for (const obj of records) {
+    const msg = ADAPTERS[source].message(obj, { includeTools });
+    if (!msg || !msg.text.trim()) continue;
+    out.push(includeSkillBodies ? msg : reduceSkillBody(msg));
+  }
+  return out;
+}
+
+function parseMessages(raw, source, overrides = {}) {
+  return messagesFrom(parseRecords(raw), source, overrides);
+}
+
+// Predicate shared by the visible search and the excluded-match recount below:
+// same role/--since filtering, same literal/--any/--regex test, but without
+// touching wordDf/messagesScanned (those describe the visible population).
+function countMatching(messages, mtime) {
+  let n = 0;
+  for (const msg of messages) {
+    if (opts.role !== 'all' && msg.role !== opts.role) continue;
+    if (sinceTime != null || untilTime != null) {
+      const time = timeOf(msg.timestamp) ?? timeOf(messages[0]?.timestamp) ?? mtime();
+      if (sinceTime != null && time < sinceTime) continue;
+      if (untilTime != null && time >= untilTime) continue;
+    }
+    const haystack = opts.caseSensitive ? msg.text : msg.text.toLowerCase();
+    if (anyWords) {
+      if (!anyWords.some((w) => haystack.includes(w))) continue;
+    } else if (opts.regex ? !queryRegex.test(msg.text) : !haystack.includes(q)) continue;
+    n++;
+  }
+  return n;
 }
 
 function sessionId(file) {
@@ -770,17 +999,67 @@ function truncate(s, n) {
   return `${cut}...`;
 }
 
+function truncateAround(s, n, needle) {
+  const oneLine = s.replace(/\s+/g, ' ').trim();
+  if (Buffer.byteLength(oneLine) <= n) return oneLine;
+  if (n <= 3) return '...';
+  const hay = opts.caseSensitive ? oneLine : oneLine.toLowerCase();
+  const key = needle ? (opts.caseSensitive ? String(needle) : String(needle).toLowerCase()) : '';
+  const focus = key ? hay.indexOf(key) : -1;
+  if (focus < 0) return truncate(s, n);
+
+  let lo = focus;
+  let hi = Math.min(oneLine.length, focus + key.length);
+  const cost = (left, right) => {
+    let c = Buffer.byteLength(oneLine.slice(left, right));
+    if (left > 0) c += 3;
+    if (right < oneLine.length) c += 3;
+    return c;
+  };
+  if (cost(lo, hi) > n) {
+    const clipped = truncate(oneLine.slice(lo), n - (lo > 0 ? 3 : 0));
+    return lo > 0 ? `...${clipped}` : clipped;
+  }
+
+  const prev = (i) => (i > 1 && /[\uDC00-\uDFFF]/.test(oneLine[i - 1]) ? i - 2 : i - 1);
+  const next = (i) => (i < oneLine.length && /[\uD800-\uDBFF]/.test(oneLine[i]) ? Math.min(oneLine.length, i + 2) : i + 1);
+  while (lo > 0 || hi < oneLine.length) {
+    const nextLo = lo > 0 ? prev(lo) : lo;
+    const nextHi = hi < oneLine.length ? next(hi) : hi;
+    const canLeft = lo > 0 && cost(nextLo, hi) <= n;
+    const canRight = hi < oneLine.length && cost(lo, nextHi) <= n;
+    if (!canLeft && !canRight) break;
+    const leftSpan = focus - lo;
+    const rightSpan = hi - (focus + key.length);
+    if (canLeft && (!canRight || leftSpan <= rightSpan)) lo = nextLo;
+    else hi = nextHi;
+  }
+  let out = oneLine.slice(lo, hi);
+  if (/[\uD800-\uDBFF]$/.test(out)) out = out.slice(0, -1);
+  if (lo > 0) out = `...${out}`;
+  if (hi < oneLine.length) out = `${out}...`;
+  return out;
+}
+
 function timeOf(value) {
   if (!value) return null;
   const t = Date.parse(value);
   return Number.isFinite(t) ? t : null;
 }
 
+// --until is an exclusive upper bound that includes the period it names, so
+// `--since today --until today` is today and `--until 2026-05-03` keeps that date.
+function parseUntil(value) {
+  const start = parseSince(value);
+  if (start == null) return null;
+  return /^\d+d$/.test(value) ? start : start + DAY_MS;
+}
+
 function parseSince(value) {
   const now = new Date();
   if (value === 'today') return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const days = value.match(/^(\d+)d$/);
-  if (days) return now.getTime() - Number(days[1]) * 24 * 60 * 60 * 1000;
+  if (days) return now.getTime() - Number(days[1]) * DAY_MS;
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return Date.parse(`${value}T00:00:00`);
   return null;
 }
@@ -802,8 +1081,13 @@ function normalizeQueryRegex(pattern, caseSensitive) {
 }
 
 function usage(code, msg) {
+  const out = code === 0 ? console.log : console.error;
   if (msg) console.error(msg);
-  console.error('Usage: session-grep.mjs --query TEXT [--session ID] [--any] [--candidates] [--regex] [--limit N] [--before N] [--after N] [--role user|assistant|all] [--target-type claude|codex|pi|all ...] [--source claude|codex|pi|all] [--since today|Nd|YYYY-MM-DD] [--sort newest|oldest|file] [--root DIR ...] [--sources-file FILE] [--target-root DIR ...] [--exclude-session ID_PREFIX ...] [--exclude-re REGEX ...] [--max-chars BYTES | --max-tokens N] [--include-tools] [--case-sensitive] [--json] | --overview | --skim ID | --session ID --at INDEX | --list-roots | --self-test');
+  out('Usage: session-grep.mjs --query TEXT [options] | --overview | --skim ID | --session ID --at INDEX [--focus TEXT] | --list-roots | --self-test');
+  if (code === 0 || !msg) {
+    const width = Math.max(...FLAGS.map(([flag, arg]) => flag.length + (arg ? arg.length + 1 : 0)));
+    for (const [flag, arg, desc] of FLAGS) out(`  ${(arg ? `${flag} ${arg}` : flag).padEnd(width)}  ${desc}`);
+  }
   process.exit(code);
 }
 
@@ -868,6 +1152,13 @@ async function selfTest() {
   fs.mkdirSync(path.join(dir, 'relocated-pi'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'relocated-pi', '2026-06-11T08-00-00_gggg4444.jsonl'),
     piLine('assistant', [{ type: 'text', text: 'relocatedpi reply from a configured pi root' }], '2026-06-11T08:00:00Z'));
+  // Reasoning traces: Claude plaintext thinking blocks + Codex agent_reasoning are
+  // conversation text (always searched); encrypted Codex reasoning stays skipped.
+  fs.writeFileSync(path.join(proj, 'rrrr6666.jsonl'),
+    JSON.stringify({ type: 'assistant', timestamp: '2026-06-12T08:00:00Z', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'SELFTEST-REASONHIT claude deliberation about the cache', signature: 'sig' }] } }) + '\n');
+  fs.appendFileSync(path.join(dir, 'codex', 'rollout-cccc.jsonl'),
+    JSON.stringify({ type: 'event_msg', timestamp: '2026-06-07T08:00:01Z', payload: { type: 'agent_reasoning', text: 'SELFTEST-REASONHIT codex deliberation about the cache' } }) + '\n' +
+    JSON.stringify({ type: 'response_item', timestamp: '2026-06-07T08:00:02Z', payload: { type: 'reasoning', summary: [], content: null, encrypted_content: 'SELFTEST-ENCRYPTEDNOISE' } }) + '\n');
 
   const runRaw = (args, env = {}) => execFileSync(process.execPath, [self, ...args], {
     encoding: 'utf8',
@@ -888,6 +1179,23 @@ async function selfTest() {
     check('--include-tools matches tool output', withTools.totalMatches === 1);
     const withoutTools = JSON.parse(run(['--query', 'ZEBRAECHO', '--json']));
     check('tool-only needle invisible by default', withoutTools.totalMatches === 0);
+    // #22: a miss caused only by tool exclusion must name the lever, on both the
+    // zero-hit path and a thin result — not read as "absent from the corpus".
+    check('zero-hit tool-only miss signals --include-tools',
+      withoutTools.excluded?.tools === 1 && /add --include-tools/.test(withoutTools.hint));
+    const thinTools = JSON.parse(run(['--query', 'flumoxide', '--json']));
+    check('thin result still reports matches hidden in tool blocks',
+      thinTools.totalMatches === 1 && thinTools.excluded?.tools === 1);
+    const thinText = run(['--query', 'flumoxide']);
+    check('text header carries the tools_excluded signal', /tools_excluded=1 \(add --include-tools\)/.test(thinText));
+    // #24: multi-word literal guidance is proactive — in the header on hits too —
+    // while matching semantics stay literal.
+    const multiText = run(['--query', 'flumoxide bug came']);
+    check('multi-word literal header advises --any proactively', /literal_multiword=true \(retry with --any/.test(multiText));
+    const multiJson = JSON.parse(run(['--query', 'flumoxide bug came', '--json']));
+    check('multi-word literal keeps literal semantics', multiJson.literalMultiword === true && multiJson.totalMatches === 1);
+    const singleJson = JSON.parse(run(['--query', 'flumoxide', '--json']));
+    check('single-term query carries no literal_multiword flag', !('literalMultiword' in singleJson));
 
     // --any: rarity ranking + dedupe
     const any = JSON.parse(run(['--query', 'sidebar flumoxide sidebar', '--any', '--json']));
@@ -1035,6 +1343,39 @@ async function selfTest() {
     const window = skRun(['--session', 'skillinj', '--at', '2', '--before', '2', '--after', '0']);
     check('reduced body keeps the index aligned', /\[skill body omitted: demo-skill\]/.test(window)
       && /QUOKKAWORD appears here/.test(window));
+
+    // Ranking + output-budget policy: forks collapse, BM25 prefers short hits,
+    // oversized previews keep the match span, --candidates BEST is the best score.
+    const rkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-grep-rank-'));
+    const rkRun = (args) => runRaw([...args, '--root', rkDir]);
+    const sharedFork = 'FORKNEEDLE confirmed the form-fill event and the tool-result loop.';
+    fs.writeFileSync(path.join(rkDir, 'ancestor.jsonl'), line('assistant', text(sharedFork), '2026-04-06T21:26:18Z'));
+    fs.writeFileSync(path.join(rkDir, 'resume1.jsonl'), line('assistant', text(sharedFork), '2026-04-10T17:29:13Z'));
+    fs.writeFileSync(path.join(rkDir, 'other.jsonl'), line('assistant', text('FORKNEEDLE UNIQUEFORK later'), '2026-04-11T09:00:00Z'));
+    const forks = JSON.parse(rkRun(['--query', 'FORKNEEDLE', '--json', '--max-chars', '4000']));
+    check('fork copies collapse onto the ancestor', forks.totalMatches === 3 && forks.shown === 2
+      && forks.matches.some((m) => m.id === 'ancestor' && m.forkCopies === 1)
+      && forks.matches.some((m) => m.match.text.includes('UNIQUEFORK')));
+    fs.writeFileSync(path.join(rkDir, 'short.jsonl'), line('assistant', text('rankoxide'), '2026-06-01T10:00:00Z'));
+    fs.writeFileSync(path.join(rkDir, 'long.jsonl'), line('assistant', text(`${'padding '.repeat(800)} rankoxide ${'padding '.repeat(800)}`), '2026-06-02T10:00:00Z'));
+    const ranked = JSON.parse(rkRun(['--query', 'rankoxide', '--any', '--json', '--max-chars', '8000']));
+    const shortHit = ranked.matches.find((m) => m.id === 'short');
+    const longHit = ranked.matches.find((m) => m.id === 'long');
+    check('BM25 prefers a short hit over a newer long mention', shortHit && longHit && shortHit.score > longHit.score);
+    const blob = `STARTTOKEN ${'padding '.repeat(2000)} OVERSIZEHIT MIDFACT ${'padding '.repeat(2000)}`;
+    fs.writeFileSync(path.join(rkDir, 'huge-a.jsonl'), line('assistant', text(blob), '2026-07-01T10:00:00Z'));
+    fs.writeFileSync(path.join(rkDir, 'huge-b.jsonl'), line('assistant', text(blob.replace('MIDFACT', 'MIDFACT-B')), '2026-07-02T10:00:00Z'));
+    const huge = JSON.parse(rkRun(['--query', 'OVERSIZEHIT', '--json', '--before', '0', '--after', '0', '--max-chars', '12000']));
+    check('oversized hits keep the match span and share the aperture', huge.shown >= 2
+      && huge.matches.every((m) => m.match.text.includes('OVERSIZEHIT') && !m.match.text.includes('STARTTOKEN'))
+      && huge.matches.every((m) => Buffer.byteLength(m.match.text) <= 4000));
+    fs.writeFileSync(path.join(rkDir, 'wrapped.jsonl'),
+      line('assistant', text('wrapoxide is the spawnSync cause'), '2026-08-01T10:00:00Z')
+      + line('user', text(`${'Untrusted agent history for review. '.repeat(80)} wrapoxide once.`), '2026-08-01T10:00:05Z'));
+    const best = JSON.parse(rkRun(['--query', 'wrapoxide', '--any', '--candidates', '--json']));
+    const wrapped = best.candidates.find((c) => c.id === 'wrapped');
+    check('--candidates BEST is the short on-topic hit', wrapped?.match.role === 'assistant' && /spawnSync/.test(wrapped.match.text));
+
     const spine = run(['--skim', 'aaaa1111', '--max-chars', '900']);
     check('skim rendered output stays within byte budget', Buffer.byteLength(spine) <= 900);
     check('skim keeps head', spine.includes('number 0'));
@@ -1067,6 +1408,14 @@ async function selfTest() {
     check('pi toolResult matches with --include-tools', piTools.totalMatches === 1 && piTools.matches[0].match.role === 'user');
     const piCustom = JSON.parse(run(['--query', 'PICUSTOM', '--json', '--include-tools']));
     check('pi non-conversation roles skipped', piCustom.totalMatches === 0);
+
+    // reasoning traces are conversation text: searched by default, never tool-gated
+    const reason = JSON.parse(run(['--query', 'SELFTEST-REASONHIT', '--json']));
+    check('claude thinking + codex agent_reasoning searchable by default',
+      reason.totalMatches === 2 && new Set(reason.matches.map((m) => m.source)).size === 2
+      && reason.matches.every((m) => m.match.role === 'assistant'));
+    const encrypted = JSON.parse(run(['--query', 'SELFTEST-ENCRYPTEDNOISE', '--json']));
+    check('encrypted codex reasoning stays skipped', encrypted.totalMatches === 0);
 
     // --exclude-re: path-based exclusion holds across search, browse, and window modes
     const excluded = JSON.parse(run(['--query', 'sidebar', '--json', '--exclude-re', 'aaaa1111']));
@@ -1102,6 +1451,21 @@ async function selfTest() {
     check('--target-root narrows to configured root and keeps parser mapping', targetedPi.totalMatches === 1 && targetedPi.matches[0].source === 'pi');
     const targetedMiss = JSON.parse(runRaw(['--query', 'relocatedsource', '--json', '--sources-file', sourcesFile, '--target-root', path.join(dir, 'relocated-pi')]));
     check('--target-root excludes other configured roots', targetedMiss.totalMatches === 0);
+    // Issue #20: a subdirectory of a configured root narrows to that subdirectory and
+    // inherits its parser type; a path under no configured root still fails closed.
+    fs.mkdirSync(path.join(dir, 'moved', 'subproj'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'moved', 'subproj', 'sub00001.jsonl'),
+      line('assistant', text('SUBROOTMARKER scoped to one project'), '2026-06-09T09:00:00Z'));
+    const targetedSub = JSON.parse(runRaw(['--query', 'SUBROOTMARKER', '--json', '--sources-file', sourcesFile, '--target-root', path.join(dir, 'moved', 'subproj')]));
+    check('--target-root subdirectory inherits configured type', targetedSub.totalMatches === 1 && targetedSub.matches[0].source === 'claude');
+    const targetedSubMiss = JSON.parse(runRaw(['--query', 'movedclaude', '--json', '--sources-file', sourcesFile, '--target-root', path.join(dir, 'moved', 'subproj')]));
+    check('--target-root subdirectory excludes sibling files', targetedSubMiss.totalMatches === 0);
+    const targetedOutside = spawnSync(process.execPath, [self, '--query', 'x', '--sources-file', sourcesFile, '--target-root', path.join(os.tmpdir(), 'session-grep-outside-root')], { encoding: 'utf8' });
+    check('--target-root outside configured roots fails closed', targetedOutside.status === 1 && targetedOutside.stderr.includes('--target-root did not match any configured roots'));
+    // Issue #19: raw_files_with_hits describes the scope actually searched, not the
+    // prefilter total across excluded types.
+    const scopedCount = JSON.parse(runRaw(['--query', 'zorptastic', '--json', '--sources-file', sourcesFile, '--target-type', 'claude']));
+    check('--target-type scopes raw_files_with_hits', scopedCount.totalMatches === 0 && scopedCount.rawFilesWithHits === 0);
     const missingExplicit = spawnSync(process.execPath, [self, '--list-roots', '--sources-file', path.join(dir, 'missing_sources.json')], { encoding: 'utf8' });
     check('missing explicit --sources-file fails closed', missingExplicit.status === 1 && missingExplicit.stderr.includes('--sources-file') && !missingExplicit.stdout.includes('origin='));
     const rootAndSources = spawnSync(process.execPath, [self, '--query', 'x', '--root', dir, '--sources-file', sourcesFile], { encoding: 'utf8' });

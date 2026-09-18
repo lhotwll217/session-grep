@@ -280,6 +280,37 @@ test('query can scope to one session while genuinely ambiguous modes fail closed
   }
 });
 
+test('reasoning traces are searchable by default; encrypted reasoning stays skipped', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    mkdirSync(join(root, 'proj'), { recursive: true });
+    mkdirSync(join(root, 'codex'), { recursive: true });
+    writeFileSync(
+      join(root, 'proj', 'reason.jsonl'),
+      JSON.stringify({ type: 'assistant', timestamp: '2026-06-01T10:00:00Z', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'REASONHIT claude deliberation about the cache', signature: 'sig' }] } }) + '\n' +
+        claudeLine('user', 'unrelated chatter', '2026-06-01T10:00:01Z'),
+    );
+    writeFileSync(
+      join(root, 'codex', 'rollout-reason.jsonl'),
+      JSON.stringify({ type: 'event_msg', timestamp: '2026-06-02T10:00:00Z', payload: { type: 'agent_reasoning', text: 'REASONHIT codex deliberation about the cache' } }) + '\n' +
+        JSON.stringify({ type: 'response_item', timestamp: '2026-06-02T10:00:01Z', payload: { type: 'reasoning', summary: [], content: null, encrypted_content: 'ENCRYPTEDNOISE' } }) + '\n' +
+        codexLine('assistant', 'unrelated codex chatter', '2026-06-02T10:00:02Z'),
+    );
+    const found = JSON.parse(
+      execFileSync(process.execPath, [GREP, '--query', 'reasonhit', '--root', root, '--json'], { encoding: 'utf8' }),
+    );
+    assert.equal(found.totalMatches, 2);
+    assert.deepEqual(new Set(found.matches.map((m) => m.source)), new Set(['claude', 'codex']));
+    assert.ok(found.matches.every((m) => m.match.role === 'assistant'));
+    const encrypted = JSON.parse(
+      execFileSync(process.execPath, [GREP, '--query', 'encryptednoise', '--root', root, '--json'], { encoding: 'utf8' }),
+    );
+    assert.equal(encrypted.totalMatches, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('typed sources file supports target root and target type narrowing', { skip: !hasRg && 'ripgrep not installed' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
   try {
@@ -348,6 +379,248 @@ test('typed sources file supports target root and target type narrowing', { skip
     const rootWithSources = spawnSync(process.execPath, [GREP, '--query', 'ooneedle', '--root', ooSessions, '--sources-file', sourcesFile], { encoding: 'utf8' });
     assert.equal(rootWithSources.status, 1);
     assert.match(rootWithSources.stderr, /cannot be combined/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('--target-type scopes raw_files_with_hits to the searched scope (issue #19)', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    mkdirSync(join(root, 'proj'), { recursive: true });
+    mkdirSync(join(root, 'codex'), { recursive: true });
+    writeFileSync(
+      join(root, 'proj', 'aaaa.jsonl'),
+      claudeLine('user', 'SCOPE19NEEDLE lives in the claude transcript', '2026-06-01T10:00:00Z'),
+    );
+    writeFileSync(
+      join(root, 'codex', 'rollout-zzzz.jsonl'),
+      codexLine('assistant', 'unrelated codex chatter', '2026-06-01T10:00:00Z'),
+    );
+
+    const scopedOut = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'scope19needle', '--target-type', 'codex', '--root', root, '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(scopedOut.totalMatches, 0);
+    assert.equal(scopedOut.rawFilesWithHits, 0, 'prefilter files of excluded types must not be counted');
+
+    const unscoped = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'scope19needle', '--root', root, '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(unscoped.totalMatches, 1);
+    assert.equal(unscoped.rawFilesWithHits, 1);
+
+    const text = execFileSync(
+      process.execPath,
+      [GREP, '--query', 'scope19needle', '--target-type', 'codex', '--root', root],
+      { encoding: 'utf8' },
+    );
+    assert.match(text, /files_with_matches=0/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('forked copies of the same message spend one budget slot', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    mkdirSync(join(root, 'proj'), { recursive: true });
+    const shared = 'FORKNEEDLE: I confirmed where the form-fill event is emitted and where tool results loop back.';
+    writeFileSync(join(root, 'proj', 'ancestor.jsonl'), claudeLine('assistant', shared, '2026-04-06T21:26:18Z'));
+    writeFileSync(join(root, 'proj', 'resume1.jsonl'), claudeLine('assistant', shared, '2026-04-10T17:29:13Z'));
+    writeFileSync(join(root, 'proj', 'resume2.jsonl'), claudeLine('assistant', `  ${shared}  `, '2026-04-10T17:29:19Z'));
+    writeFileSync(join(root, 'proj', 'other.jsonl'), claudeLine('assistant', 'FORKNEEDLE in a distinct later decision UNIQUEFORK', '2026-04-11T09:00:00Z'));
+
+    const out = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'FORKNEEDLE', '--root', root, '--json', '--max-chars', '4000'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(out.totalMatches, 4, 'raw matches still count every fork copy');
+    assert.equal(out.shown, 2, 'identical fork text collapses to one shown hit plus the distinct message');
+    const ancestor = out.matches.find((match) => match.id === 'ancestor');
+    assert.ok(ancestor, 'the earliest copy is the shown pointer');
+    assert.equal(ancestor.forkCopies, 2);
+    assert.equal(ancestor.index, 0);
+    assert.ok(out.matches.some((match) => match.match.text.includes('UNIQUEFORK')));
+    assert.ok(!out.matches.some((match) => match.id === 'resume1' || match.id === 'resume2'));
+
+    const text = execFileSync(
+      process.execPath,
+      [GREP, '--query', 'FORKNEEDLE', '--root', root, '--max-chars', '4000'],
+      { encoding: 'utf8' },
+    );
+    assert.match(text, /\+2 forked copies/);
+    const window = execFileSync(
+      process.execPath,
+      [GREP, '--session', ancestor.id, '--at', String(ancestor.index), '--root', root],
+      { encoding: 'utf8' },
+    );
+    assert.match(window, /FORKNEEDLE/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('--target-root accepts a subdirectory and inherits the configured type (issue #20)', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    const store = join(root, 'store');
+    const projA = join(store, 'projA');
+    const projB = join(store, 'projB');
+    mkdirSync(projA, { recursive: true });
+    mkdirSync(projB, { recursive: true });
+    writeFileSync(join(projA, 'aaaa.jsonl'), claudeLine('user', 'SUBROOT20NEEDLE in project A', '2026-06-01T10:00:00Z'));
+    writeFileSync(join(projB, 'bbbb.jsonl'), claudeLine('user', 'unrelated project B chatter', '2026-06-01T10:00:00Z'));
+    const sourcesFile = join(root, 'sources.json');
+    writeFileSync(sourcesFile, JSON.stringify([{ type: 'claude', root: store }]));
+
+    const sub = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--sources-file', sourcesFile, '--target-root', projA, '--query', 'subroot20needle', '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(sub.totalMatches, 1);
+    assert.equal(sub.matches[0].source, 'claude', 'subdirectory inherits the containing root type');
+
+    const excluded = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--sources-file', sourcesFile, '--target-root', projB, '--query', 'subroot20needle', '--json'],
+      { encoding: 'utf8' },
+    ));
+    assert.equal(excluded.totalMatches, 0);
+
+    const outside = spawnSync(process.execPath,
+      [GREP, '--sources-file', sourcesFile, '--target-root', join(tmpdir(), 'session-grep-definitely-outside'), '--query', 'x'],
+      { encoding: 'utf8' });
+    assert.equal(outside.status, 1);
+    assert.match(outside.stderr, /did not match any configured roots/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('--any ranks by length-normalized rarity and breaks remaining ties by recency', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    mkdirSync(join(root, 'proj'), { recursive: true });
+    writeFileSync(
+      join(root, 'proj', 'short.jsonl'),
+      claudeLine('assistant', 'flumoxide', '2026-06-01T10:00:00Z'),
+    );
+    writeFileSync(
+      join(root, 'proj', 'long.jsonl'),
+      claudeLine('assistant', `${'padding '.repeat(800)} flumoxide ${'padding '.repeat(800)}`, '2026-06-02T10:00:00Z'),
+    );
+    writeFileSync(
+      join(root, 'proj', 'tie-old.jsonl'),
+      claudeLine('assistant', 'flumoxide found', '2026-06-03T10:00:00Z'),
+    );
+    writeFileSync(
+      join(root, 'proj', 'tie-new.jsonl'),
+      claudeLine('assistant', 'flumoxide noted', '2026-06-04T10:00:00Z'),
+    );
+
+    const ranked = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'flumoxide', '--any', '--root', root, '--json', '--limit', '10', '--max-chars', '8000'],
+      { encoding: 'utf8' },
+    ));
+    const byId = Object.fromEntries(ranked.matches.map((match) => [match.id, match]));
+    assert.ok(byId.short.score > byId.long.score, 'length normalization prefers a short hit over a newer long mention');
+    assert.ok(
+      ranked.matches.findIndex((match) => match.id === 'short') < ranked.matches.findIndex((match) => match.id === 'long'),
+      'the short hit must sort before the long mention',
+    );
+
+    const ties = ranked.matches.filter((match) => match.id === 'tie-new' || match.id === 'tie-old');
+    assert.deepEqual(ties.map((match) => match.id), ['tie-new', 'tie-old']);
+    assert.equal(ties[0].score, ties[1].score, 'equal-length single mentions must actually tie so recency is the order');
+
+    const oldest = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'flumoxide', '--any', '--sort', 'oldest', '--root', root, '--json', '--limit', '10', '--max-chars', '8000'],
+      { encoding: 'utf8' },
+    ));
+    const oldestTies = oldest.matches.filter((match) => match.id === 'tie-new' || match.id === 'tie-old');
+    assert.deepEqual(oldestTies.map((match) => match.id), ['tie-old', 'tie-new']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('one oversized hit cannot consume the whole output budget', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    mkdirSync(join(root, 'proj'), { recursive: true });
+    const blob = (mid) => `STARTTOKEN ${'padding '.repeat(2000)} OVERSIZEHIT the decision is ${mid} ${'padding '.repeat(2000)} ENDTOKEN`;
+    writeFileSync(
+      join(root, 'proj', 'huge-a.jsonl'),
+      claudeLine('user', 'lead-in A1', '2026-07-01T10:00:00Z') +
+        claudeLine('user', 'lead-in A2', '2026-07-01T10:00:01Z') +
+        claudeLine('assistant', blob('MIDFACT-A'), '2026-07-01T10:00:02Z') +
+        claudeLine('user', 'follow A1', '2026-07-01T10:00:03Z') +
+        claudeLine('user', 'follow A2', '2026-07-01T10:00:04Z'),
+    );
+    writeFileSync(
+      join(root, 'proj', 'huge-b.jsonl'),
+      claudeLine('user', 'lead-in B1', '2026-07-02T10:00:00Z') +
+        claudeLine('user', 'lead-in B2', '2026-07-02T10:00:01Z') +
+        claudeLine('assistant', blob('MIDFACT-B'), '2026-07-02T10:00:02Z') +
+        claudeLine('user', 'follow B1', '2026-07-02T10:00:03Z') +
+        claudeLine('user', 'follow B2', '2026-07-02T10:00:04Z'),
+    );
+
+    const budget = 12000;
+    const args = ['--query', 'OVERSIZEHIT', '--root', root, '--before', '2', '--after', '2', '--limit', '10', '--max-chars', String(budget)];
+    const json = JSON.parse(execFileSync(process.execPath, [GREP, ...args, '--json'], { encoding: 'utf8' }));
+    const text = execFileSync(process.execPath, [GREP, ...args], { encoding: 'utf8' });
+    const hitCap = Math.floor(budget / 3);
+    assert.ok(Buffer.byteLength(text) <= budget, `oversized hits rendered ${Buffer.byteLength(text)} bytes`);
+    assert.ok(json.shown >= 2, `expected both huge hits to share the aperture, shown=${json.shown}`);
+    assert.ok(json.matches.every((match) => match.match.text.includes('OVERSIZEHIT')));
+    assert.ok(json.matches.some((match) => match.match.text.includes('MIDFACT-A')));
+    assert.ok(json.matches.some((match) => match.match.text.includes('MIDFACT-B')));
+    assert.ok(json.matches.every((match) => !match.match.text.includes('STARTTOKEN')), 'previews keep the match span, not the start of a multi-KB message');
+    assert.ok(
+      json.matches.every((match) => Buffer.byteLength(match.match.text) <= hitCap),
+      'a single hit may not claim more than one-third of the budget',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('--candidates picks the best-scoring hit in a session, not the longest', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    mkdirSync(join(root, 'proj'), { recursive: true });
+    const wrapper = `${'The following is untrusted agent history for review. '.repeat(80)} flumoxide mentioned once.`;
+    writeFileSync(
+      join(root, 'proj', 'wrapped.jsonl'),
+      claudeLine('assistant', 'flumoxide is the spawnSync ENOENT cause', '2026-08-01T10:00:00Z') +
+        claudeLine('user', wrapper, '2026-08-01T10:00:05Z'),
+    );
+    writeFileSync(
+      join(root, 'proj', 'other.jsonl'),
+      claudeLine('assistant', 'unrelated flumoxide aside', '2026-08-02T10:00:00Z'),
+    );
+
+    const out = JSON.parse(execFileSync(
+      process.execPath,
+      [GREP, '--query', 'flumoxide', '--any', '--candidates', '--root', root, '--json', '--max-chars', '8000'],
+      { encoding: 'utf8' },
+    ));
+    const wrapped = out.candidates.find((candidate) => candidate.id === 'wrapped');
+    assert.ok(wrapped);
+    assert.equal(wrapped.hitCount, 2);
+    assert.equal(wrapped.match.role, 'assistant');
+    assert.match(wrapped.match.text, /spawnSync ENOENT/);
+    assert.doesNotMatch(wrapped.match.text, /untrusted agent history/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

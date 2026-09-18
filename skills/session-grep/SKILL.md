@@ -1,207 +1,120 @@
 ---
 name: session-grep
 description: >-
-  Literal or regex grep across local AI session transcripts with bounded message context. Use when the user asks to search exact words, punctuation, hashtags/patterns, phrases like "why did you", or wants messages before/after a hit. This is for targeted drill-in, not broad topic discovery.
+  Find content and sessions in local AI session transcripts (Claude Code, Codex, Pi): ranked any-word search, literal or regex grep, per-session overviews and skims, all with a bounded output budget and drill-in pointers. Use when the user asks what was said, decided, or done in a past session, wants to locate which session something happened in, or wants exact text or a pattern with the messages around it.
 ---
 
 # session-grep
 
-Searches local AI CLI session files with exact literal matching or opt-in regex matching and returns only bounded
-message context around each hit. Use this when BM25 search is too fuzzy, cannot search
-punctuation/common phrases, or when you need a simple pattern like hashtags.
-
-## Onboarding (first use)
-
-The folders searched by default are the `DEFAULT_SOURCES` constant near the top of
-`session-grep.mjs` — the standard per-user homes for each supported tool. Roots that
-don't exist are skipped, so zero config works out of the box. On first use, run:
-
-```bash
-node session-grep.mjs --list-roots
-```
-
-Confirm it matches where this machine's sessions actually live. Known session
-homes:
-
-| tool | home | format |
-|---|---|---|
-| Claude Code | `~/.claude/projects` | jsonl (supported) |
-| Codex CLI | `~/.codex/sessions`, `~/.codex/archived_sessions` | jsonl (supported) |
-| Pi | `~/.pi/agent/sessions` | jsonl (supported) |
-| Cursor | `~/Library/Application Support/Cursor/User/workspaceStorage` (macOS), `~/.config/Cursor/...` (linux) | sqlite (not yet parseable) |
-| Gemini CLI | `~/.gemini/tmp` | json (not yet parseable) |
-| opencode | `~/.local/share/opencode/storage` | split json (not yet parseable) |
-
-Hosts and launchers are not transcript formats. Roots are keyed by adapter `type`
-(`claude`, `codex`, `pi`) and directory.
-
-Quick existence check: `ls -d ~/.claude/projects ~/.codex/sessions 2>/dev/null`.
-There are four ways to search somewhere other than the defaults, in order of
-precedence:
-
-1. `--root DIR` — per call, no config; format auto-detected. Repeatable.
-2. `--sources-file FILE` — per call path to a JSON array of `{ type, root }`; use this
-   when the directory does not reveal the parser type.
-3. `$SESSION_GREP_SOURCES_FILE` — env path to the same JSON array, useful for a
-   global/npx install or CI.
-4. Edit `DEFAULT_SOURCES` in `session-grep.mjs` — the skill is vendored into your
-   repo via `npx skills add`, so this file is yours. Adding a bespoke tool means
-   dropping an adapter in `adapters/` and adding a line here; commit both.
-
-`--sources-file` and `$SESSION_GREP_SOURCES_FILE` both *replace* the defaults for that run.
-Do not combine `--root` and `--sources-file`: `--root` is an untyped one-off override;
-use `--target-root` with `--sources-file` to narrow configured typed roots.
-
-The override file is a plain array:
-
-```json
-[
-  { "type": "codex", "root": "~/alt/codex/sessions" }
-]
-```
-
-`type` must be an adapter that session-grep supports (`claude`, `codex`, or `pi` today) —
-it selects the parser, so a relocated Codex store does not need `codex` in its path.
-An override is authoritative: it does not teach a new format, only routes a known
-parser at a directory. A missing, unparseable, or non-array `--sources-file` fails
-closed; the ambient `$SESSION_GREP_SOURCES_FILE` form warns on stderr and falls back to
-the built-in defaults rather than failing silently — `--list-roots` reports
-`config_error=true` for that env fallback case.
-
-Use `--target-root DIR` to narrow a configured source map to one or more roots while
-preserving the `{ type, root }` parser mapping. This is different from `--root DIR`,
-which is an untyped one-off root whose format must be auto-detected.
-
-The default routes live in `DEFAULT_SOURCES`, the source resolver lives in
-`sources.mjs`, and parser implementations live in `adapters/`.
-
-Format support lives in the `adapters/` folder next to the script — one file per
-tool, each exporting `{name, detect(file), message(record, opts)}`. Supporting a
-new JSONL-based tool means dropping one file in that folder (and adding a
-`--self-test` fixture); non-JSONL formats also need a reader change in the script.
-
-## When to use
-
-- "grep sessions for ..."
-- "search exact phrase ..."
-- "find where I asked why did you ..."
-- punctuation searches like `?`
-- any request for messages before/after a specific text hit
-
-## Disclosure tiers and what each costs
-
-The modes form a ladder from cheap-and-broad to precise-and-narrow. Pick the
-cheapest tier that can answer the question; budgets are BYTES and ~4 bytes ≈ 1
-token, so the default 8k budget is roughly 2k tokens per call.
-
-| tier | call | returns | typical cost |
-|---|---|---|---|
-| 1 inventory | `--overview` | 2-line digest per session: id, span, counts, opening | ≤ 8k bytes (~2k tok) |
-| 2 shape | `--skim ID` | one session's conversational spine, head/tail kept, middle sampled | ≤ 16k bytes (~4k tok) |
-| 3 evidence | `--query` / `--any` | ranked matching messages with ±context and pointers | ≤ 8k bytes (~2k tok) |
-| 4 drill-in | `--session ID --at IDX` | the exact messages around one hit | ≤ 8k, usually far less |
-
-"Which session was X?" is tier 1→2; "what did we decide about X?" is tier 3 then
-tier 4 on the best hit. Don't open tier 2 on multiple sessions when one tier-3
-query would locate the session and the evidence at once.
-
-**Score semantics:** `--any` scores are computed against per-run statistics, so they
-are comparable within one result set but NEVER across invocations. To compare
-candidate terms, put them in one `--any` query instead of comparing scores from
-two runs.
-
-**Budget semantics and their costs:** the byte ceiling is absolute, and three
-deliberate trade-offs enforce it. (1) Selection is a strict rank-order prefix:
-each hit renders at a fixed size and selection stops at the first hit that does
-not fit — so raising `--max-chars` only ever ADDS hits (safe retry), at the cost
-of occasionally showing one hit fewer than aggressive squeezing could. (2) Under
-a near-floor budget the `word_hits` table is dropped before any evidence is —
-metadata is advisory and comes back on a bigger-budget re-run. (3) As a last
-resort the sole shown hit may have its context shed, text shrunk, and path
-visibly truncated (`...`); the `id`/`idx` pointer always stays valid — drill in
-with `--session ID --at IDX`, don't parse truncated paths. These degradations
-only engage near the 500-byte floor; at the default budgets none of them fire —
-prefer raising the budget over running at the floor.
-
-## Retrieval principle
-
-When no stronger filtering criteria is given, treat **recency as the default heuristic for
-relevance**. Search newest-first and prefer a recent window (`--since today`, `--since 7d`,
-or another explicit date) before expanding all-time. Only broaden when recent results are
-missing or insufficient.
+Searches local AI CLI session files and returns bounded message context with a stable
+pointer per hit. Reasoning traces (Claude `thinking`, Codex `agent_reasoning`) are
+conversation text and always searched; tool output and injected skill bodies are
+excluded by default, and the result says when a match hid behind that exclusion.
 
 ## How to use
 
-The script lives NEXT TO THIS FILE (in the repo: `skills/session-grep/session-grep.mjs`; as an
-installed skill it sits in this skill's directory). Invoke it by its path relative to
-this SKILL.md — shown below as `session-grep.mjs`:
+The script lives NEXT TO THIS FILE (in the repo: `skills/session-grep/session-grep.mjs`;
+as an installed skill it sits in this skill's directory). Invoke it by its path relative
+to this SKILL.md, shown below as `session-grep.mjs`. First run on a machine, or roots that
+look wrong: read [ONBOARDING.md](ONBOARDING.md).
 
 ```bash
-node session-grep.mjs --query "why did you" --since 7d --limit 12 --before 2 --after 2
-node session-grep.mjs --query "sidebar poll triage membership" --any --candidates # one best pointer per matching session
-node session-grep.mjs --query "checkpoint" --session 269a                    # search only inside one known session
-node session-grep.mjs --overview                                          # digest of every session
-node session-grep.mjs --skim 269a --max-chars 12000                      # one session's conversation, sampled
-node session-grep.mjs --list-roots                                        # show the source/root map being searched
-node session-grep.mjs --regex --query "#[A-Za-z0-9_][A-Za-z0-9_-]*" --since 7d --limit 20
-node session-grep.mjs --sources-file ./sources.json --query "widget rollout"
-node session-grep.mjs --sources-file ./sources.json --target-root ~/.owner-operator/sessions --query "widget rollout"
-node session-grep.mjs --sources-file ./sources.json --target-type codex --query "widget rollout"
+node session-grep.mjs --query "sidebar poll triage membership" --any --candidates --since 7d
+node session-grep.mjs --query "why did you" --since 7d --before 2 --after 2
+node session-grep.mjs --query "checkpoint" --session 269a
+node session-grep.mjs --session 269a --at 41
+node session-grep.mjs --overview
+node session-grep.mjs --skim 269a --max-chars 12000
+node session-grep.mjs --regex --query "#[A-Za-z0-9_][A-Za-z0-9_-]*" --since 7d
 ```
 
-For broad questions (summarize a session, what was X about) start with `--overview`,
-then `--skim SESSION_ID`, then targeted `--query` for specifics. For fact questions:
-multi-word literal phrases almost never occur verbatim — use `--any` (matches any word,
-hits ranked by word rarity, per-word hit counts reported) or a single rare term.
-For discovery, add `--candidates`: grouping happens before `--limit` and `--max-chars`,
-so repeated hits from one transcript do not crowd out other matching sessions.
-Every hit is a pointer: to read around a promising hit, use `--session <id> --at <idx>`
-from its header instead of re-searching with wider context.
-Use exactly one primary command mode per invocation: `--query`, `--overview`, `--skim`,
+Use exactly one primary mode per invocation: `--query`, `--overview`, `--skim`,
 `--session ... --at ...`, or `--list-roots`. A query may add `--session ID` as a scope;
-genuinely ambiguous combinations fail closed rather than silently ignoring part of the request.
+ambiguous combinations fail closed.
 
-Common flags:
+## Answering a question
 
-- `--query TEXT` literal query, or a JavaScript regex pattern when `--regex` is set; the query may itself begin with dashes, such as `--units`
-- `--query TEXT --session ID_PREFIX` search only inside one known stable session, returning normal `id`/`idx` evidence pointers
-- `--any` match ANY query word; whitespace and `|` both delimit terms; hits ranked by summed word rarity (IDF); reports per-word hit counts so you learn which words are low-signal
-- `--candidates` group all ranked message hits by stable session ID before limiting/budgeting; returns one best `id`/`best_idx` pointer plus the session's total hit count
-- `--regex` treat `--query` as a JavaScript regular expression; matching is case-insensitive by default, and a common leading `(?i)` is accepted for grep compatibility
-- `--overview` no query needed: one compact digest per session (id, dates, message counts, opening prompt)
-- `--skim ID_PREFIX` no query needed: one session's user/assistant conversation, head/tail kept, middle sampled to the output budget
-- `--session ID_PREFIX --at INDEX` drill into a hit's pointer: every hit prints `id=` and `idx=` — this returns the exact messages around that index (±5 by default, `--before/--after` to widen) without re-running the search
-- `--limit N` max matching messages, default 20; use a high number for "all"
-- `--before N` messages before each hit, default 1
-- `--after N` messages after each hit, default 1
-- `--role user|assistant|all` filter matching messages, default `all`
-- `--target-type claude|codex|pi|all` narrow to one or more parser/source types, default `all`; repeatable
-- `--source claude|codex|pi|all` accepted as a compatibility alias for `--target-type`
-- `--since today|Nd|YYYY-MM-DD` filter by message/session timestamp
-- `--sort newest|oldest|file` output order, default `newest`
-- `--root DIR` search this directory of `*.jsonl` transcripts instead of the default live stores (repeatable)
-- `--sources-file FILE` use a JSON array of typed `{ type, root }` sources instead of defaults
-- `--target-root DIR` narrow the configured source map to one or more roots while preserving parser type
-- `--exclude-session ID_PREFIX` exclude a stable session ID (repeatable); unlike `--exclude-re`, this follows canonical IDs rather than filename layout
-- `--exclude-re REGEX` exclude any session file whose path matches this JavaScript regex (repeatable) — applies to every mode (search, `--overview`, `--skim`, `--session/--at`), so wrappers can enforce a path blacklist
-- `--list-roots` print the configured source/root map and whether each root exists
-- `--max-chars N` output budget in BYTES (≈ chars for ASCII), default 8000 — a hard ceiling on rendered output; every line (headers and sampling markers included) is charged, and excess hits are omitted with a notice, never dumped
-- `--max-tokens N` the same budget denominated in tokens (4 bytes ≈ 1 token)
-- `--include-skill-bodies` also match inside injected slash-command skill bodies (excluded by default: invoking a command injects the whole SKILL.md into the transcript as a user message, ~12.8% of conversational bytes, and it matches its own vocabulary). The invocation event — the `<command-message>`/`<command-name>`/`<command-args>` record, including what you asked for — is never excluded.
-- `--include-tools` also match inside tool_result blocks (excluded by default: they are file/command echoes, ~45% of bytes, and mostly restate the conversation)
-- `--case-sensitive` exact case match, useful for all-caps searches
-- `--json` machine-readable output (compact, same truncation and budget as text)
-- `--self-test` verify the tool against a built-in synthetic corpus (no dependencies) — run this after copying the skill anywhere
+1. **Scope by recency.** Recency is the default relevance heuristic: start with
+   `--since 7d` (or the window the ask names; `--until` closes it) and widen only when
+   the result is thin. A window also makes the search cheaper: files last written before
+   `--since` are never read.
+2. **Find.** `--any` with two to five rare words (identifiers, error strings, filenames),
+   plus `--candidates` when the session is unknown. Use plain `--query` for exact text or
+   punctuation and `--regex` for patterns. Multi-word literal phrases almost never occur
+   verbatim; the header says so (`literal_multiword=true`) and the `--any` retry is the
+   fix.
+3. **Read the header before the hits, and act on it.**
+   - `literal_multiword=true` → rerun with `--any`.
+   - `tools_excluded=N` or `skill_excluded=N` → the match is behind a default exclusion;
+     rerun with `--include-tools` or `--include-skill-bodies`. Reported on thin results
+     only (fewer hits than `--limit`); `total_message_matches` counts visible hits.
+   - `word_hits` with a high-count word → that word carries no signal; drop it.
+   - `N more matching messages omitted by the budget` → narrow first (`--session`,
+     `--role assistant`, `--since`, `--candidates`; for a timeline, `--sort oldest` with
+     smaller `--before/--after`), raise `--max-chars` second.
+   - `+N forked copies` → the same message replayed by resumed sessions; the pointer
+     shown is the earliest copy.
+4. **Drill in.** Every hit is a pointer: `--session ID --at IDX` from its header returns
+   the exact messages around it without re-searching; add `--focus TEXT` so a long
+   message opens centred on the span that matched instead of its start. Done when the
+   answer is quoted with source, `id`/`idx`, and timestamp.
 
-## Output rules
+For a broad ask ("what was session X about", "which session did Y"): `--overview` to
+find the session, `--skim ID` for its shape, then step 2 for specifics. Answer by
+summarizing the hits with source, id/path, timestamp, and the context needed.
 
-Query previews share the global `--max-chars` aperture across ranked entries. Small result
-sets therefore return complete short match messages when they fit; busy result sets retain
-compact previews and stable `id`/`idx` pointers for drill-in.
+## Tiers and what each costs
 
-For scoped chronology, compare `total_message_matches` with `shown`. If evidence was
-omitted, stay inside the same session and reduce `--before`/`--after`, use `--sort oldest`,
-or raise the aperture before drawing a complete timeline.
+Budgets are BYTES; ~4 bytes ≈ 1 token, so the default 8k is roughly 2k tokens per call.
+Pick the cheapest tier that answers the question.
 
-Summarize the hits; do not paste long transcript blocks. Give source, id/path, timestamp,
-and the compact context needed to understand what happened around the match.
+| tier | call | returns | typical cost |
+|---|---|---|---|
+| 1 inventory | `--overview` | 2-line digest per session: id, span, counts, opening | ≤ 8k bytes |
+| 2 shape | `--skim ID` | one session's spine, head/tail kept, middle sampled | ≤ 16k bytes |
+| 3 evidence | `--query` / `--any` | ranked hits with ±context and pointers | ≤ 8k bytes |
+| 4 drill-in | `--session ID --at IDX` | the exact messages around one hit | ≤ 8k, usually far less |
+
+One tier-3 query usually locates both the session and the evidence; open tier 2 on a
+single session, not several.
+
+## Semantics
+
+**Scores.** `--any` ranks by BM25 over per-run statistics (rarity, saturated term
+frequency, length), so scores compare within one result set and never across runs.
+Ties break by recency (newest, or oldest under `--sort oldest`), then session id and
+index. To compare candidate terms, put them in one `--any` query.
+
+**Budget.** The byte ceiling is absolute; every line is charged, and excess hits are
+omitted with a notice. Four trade-offs enforce it. (1) Selection is a strict rank-order
+prefix: competing hits are each capped to one-third of the budget and selection stops at
+the first that does not fit, so raising `--max-chars` only adds hits or lengthens
+previews. An oversized match is truncated around the matching span so the hit stays
+visible. (2) Fork/resume descendants replay their ancestor's prefix, so a copy is one
+that matches BOTH the session's opening message and the match text; copies collapse
+onto the earliest, and unrelated sessions repeating a common line stay separate.
+(3) Near the floor, the `word_hits` table is dropped before any evidence. (4) As a last
+resort the sole shown hit sheds context and truncates its path (`...`); the `id`/`idx`
+pointer always stays valid. These degradations engage only near the 500-byte floor.
+
+**Exclusions.** Tool results (~45% of bytes, file and command echoes) and injected
+slash-command skill bodies (~12.8% of conversational bytes, matching their own
+vocabulary) are excluded by default. The invocation record (`<command-message>` and
+friends) is never excluded. `--role assistant` skips user-side harness wrappers and
+review prompts that otherwise dominate keyword-dense `--candidates` BEST hits.
+
+## Flags
+
+`node session-grep.mjs --help` lists every flag with its argument and default. The ones
+whose reason is not in that line:
+
+- `--include-tools` / `--include-skill-bodies` lift the default exclusions described under
+  Semantics; message indexes depend on them, so drill in with the setting the search used.
+- `--role assistant` is the lever against user-side wrappers and review prompts (see
+  Semantics).
+- `--target-root DIR` and `--target-type` keep the configured `{ type, root }` parser
+  mapping; `--root DIR` is an untyped one-off whose format is auto-detected, and it cannot
+  be combined with `--sources-file`.
+- `--exclude-re` applies to every mode, so a wrapper can enforce a path blacklist;
+  `--exclude-session` follows canonical ids rather than filenames.
+- `--self-test` after copying the skill anywhere.
