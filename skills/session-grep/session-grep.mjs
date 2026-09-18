@@ -308,12 +308,21 @@ files = files.filter((f) => !isExcluded(f) && !isExcludedSession(f)).sort();
 if (targetTypes.size) files = files.filter((f) => targetTypes.has(sourceOf(f)));
 const matches = [];
 const q = opts.caseSensitive ? opts.query : opts.query.toLowerCase();
+// Proactive query-shape signal (#24): a multi-word literal almost never occurs
+// verbatim — surfaced in the header on every result, not just the zero-hit path.
+// Matching semantics are unchanged; this only advises the --any retry earlier.
+const literalMultiword = !opts.any && !opts.regex && opts.query.trim().split(/\s+/).length > 1;
 // --any rarity stats: document frequency per word across scanned messages. Rare words
 // are the signal; the ranking weights them (IDF) and the output reports the counts so
 // the caller learns which of its words are low-signal. Counted AFTER the --role/--since
 // filters so word_hits describes the population the caller actually sees.
 const wordDf = anyWords ? Object.fromEntries(anyWords.map((w) => [w, 0])) : null;
 let messagesScanned = 0;
+// Excluded-match accounting (#22): per-exclusion extra hits hiding behind the
+// default filters, counted over the same prefilter-eligible files. Extensible by
+// construction — a new content exclusion adds one recount stage and one key here.
+let toolsExcluded = 0;
+let skillBodiesExcluded = 0;
 
 for (const file of files) {
   const source = sourceOf(file);
@@ -323,6 +332,7 @@ for (const file of files) {
   const messages = parseMessages(raw, source);
   let fileMtime = null; // timestamp fallback, one stat per file not per message
   const mtime = () => (fileMtime ??= fs.statSync(file).mtimeMs);
+  const baseHitsBefore = matches.length;
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (opts.role !== 'all' && msg.role !== opts.role) continue;
@@ -353,6 +363,20 @@ for (const file of files) {
       after: messages.slice(i + 1, i + 1 + opts.after),
     });
   }
+  // Recount with exclusions lifted, one stage per exclusion so the signal stays
+  // attributable. Runs only over prefilter-eligible files already in hand (raw is
+  // reused, no second corpus pass) and only for exclusions actually in effect.
+  const baseHits = matches.length - baseHitsBefore;
+  if (!opts.includeTools || !opts.includeSkillBodies) {
+    const toolsLifted = countMatching(
+      parseMessages(raw, source, { includeTools: true }), mtime);
+    if (!opts.includeTools) toolsExcluded += Math.max(0, toolsLifted - baseHits);
+    if (!opts.includeSkillBodies) {
+      const allLifted = countMatching(
+        parseMessages(raw, source, { includeTools: true, includeSkillBodies: true }), mtime);
+      skillBodiesExcluded += Math.max(0, allLifted - Math.max(toolsLifted, baseHits));
+    }
+  }
 }
 
 // With --any, rank by summed word rarity (IDF): a hit on one rare identifier beats a
@@ -371,13 +395,24 @@ const limited = rankedEntries.slice(0, opts.limit);
 
 // Zero hits should steer the next query, not dead-end the agent: multi-word literal
 // phrases almost never occur verbatim in transcripts — say so and point at --any.
-const hint = !limited.length
-  ? (!opts.any && opts.query.trim().split(/\s+/).length > 1 && !opts.regex
+// When matches hid behind content exclusions, name that lever too (#22): a zero-hit
+// result otherwise reads as "not in the corpus" when the fix is a flag, not a rephrase.
+const excludedPointer = [
+  toolsExcluded > 0 && !opts.includeTools
+    ? `${toolsExcluded} more inside tool blocks — add --include-tools`
+    : null,
+  skillBodiesExcluded > 0 && !opts.includeSkillBodies
+    ? `${skillBodiesExcluded} more inside skill bodies — add --include-skill-bodies`
+    : null,
+].filter(Boolean).join('; ');
+const hintBase = !limited.length
+  ? (literalMultiword
       ? 'no hits: multi-word phrases rarely occur verbatim in transcripts — retry with --any (matches any word, ranked by words matched), or grep ONE rare term (an identifier, error string, or filename)'
       : opts.any
         ? 'no hits for any query word: try different, rarer words (identifiers, error strings, filenames), or loosen --since/--role filters'
         : 'no hits: try a rarer single term, or --any with several candidate words')
   : null;
+const hint = hintBase ? (excludedPointer ? `${hintBase}; ${excludedPointer}` : hintBase) : null;
 
 // Per-word hit counts teach the caller which of its words are low-signal: a word
 // matching thousands of messages contributes nothing — drop it next query.
@@ -457,7 +492,10 @@ if (opts.json) {
   let withStats = !!anyWords;
   // Worst-case envelope (max shown/omitted digits, omission note included, trailing
   // newline) so the real output can only come in at or under the charged size.
-  const envelope = (entriesArr, shown, omitted) => ({ query: queryEcho, ...(scopedSessionFile ? { session: sessionId(scopedSessionFile) } : {}), regex: opts.regex, any: !!opts.any, ...(withStats ? { wordHits: wordDf, messagesScanned } : {}), rawFilesWithHits: files.length, totalMatches: matches.length, ...(candidates ? { totalCandidateSessions: candidates.length } : {}), ...(opts.excludeSessions.length ? { excludedSessions: opts.excludeSessions } : {}), shown, ...(omitted ? { omittedByBudget: omitted, note: OMIT(omitted) } : {}), ...(hint ? { hint } : {}), [opts.candidates ? 'candidates' : 'matches']: entriesArr });
+  const excludedEnvelope = (toolsExcluded > 0 && !opts.includeTools) || (skillBodiesExcluded > 0 && !opts.includeSkillBodies)
+    ? { excluded: { ...(toolsExcluded > 0 && !opts.includeTools ? { tools: toolsExcluded } : {}), ...(skillBodiesExcluded > 0 && !opts.includeSkillBodies ? { skillBodies: skillBodiesExcluded } : {}) } }
+    : {};
+  const envelope = (entriesArr, shown, omitted) => ({ query: queryEcho, ...(scopedSessionFile ? { session: sessionId(scopedSessionFile) } : {}), regex: opts.regex, any: !!opts.any, ...(literalMultiword ? { literalMultiword: true } : {}), ...(withStats ? { wordHits: wordDf, messagesScanned } : {}), rawFilesWithHits: files.length, totalMatches: matches.length, ...excludedEnvelope, ...(candidates ? { totalCandidateSessions: candidates.length } : {}), ...(opts.excludeSessions.length ? { excludedSessions: opts.excludeSessions } : {}), shown, ...(omitted ? { omittedByBudget: omitted, note: OMIT(omitted) } : {}), ...(hint ? { hint } : {}), [opts.candidates ? 'candidates' : 'matches']: entriesArr });
   const room = (withOmit) => opts.maxChars - bytes(JSON.stringify(envelope([], limited.length, withOmit ? limited.length : 0))) - 1;
   // A df table that can't fit is dropped even with zero hits — the ceiling binds always.
   if (withStats && room(false) < 0) withStats = false;
@@ -491,7 +529,7 @@ if (opts.json) {
   // "\n[N] " between entries grows with the hit number — charge the widest it can get.
   const idxOverhead = String(limited.length).length + 4;
   const entryLen = (m) => renderLines(m).reduce((t, l) => t + bytes(l) + 1, idxOverhead);
-  const header = (shown) => `query=${JSON.stringify(queryEcho)}${scopedSessionFile ? ` session=${sessionId(scopedSessionFile)}` : ''}${opts.regex ? ' regex=true' : ''}${opts.any ? ` any=true` : ''}${opts.candidates ? ` candidate_sessions=${candidates.length}` : ''} raw_files_with_hits=${files.length} total_message_matches=${matches.length} shown=${shown} sort=${opts.sort}${opts.since ? ` since=${opts.since}` : ''}${opts.caseSensitive ? ' case_sensitive=true' : ''}${opts.excludeSessions.length ? ` excluded_sessions=[${opts.excludeSessions.join(',')}]` : ''}`;
+  const header = (shown) => `query=${JSON.stringify(queryEcho)}${scopedSessionFile ? ` session=${sessionId(scopedSessionFile)}` : ''}${opts.regex ? ' regex=true' : ''}${opts.any ? ` any=true` : ''}${literalMultiword ? ' literal_multiword=true (retry with --any; literal phrases rarely occur verbatim)' : ''}${opts.candidates ? ` candidate_sessions=${candidates.length}` : ''} raw_files_with_hits=${files.length} total_message_matches=${matches.length}${toolsExcluded > 0 && !opts.includeTools ? ` tools_excluded=${toolsExcluded} (add --include-tools)` : ''}${skillBodiesExcluded > 0 && !opts.includeSkillBodies ? ` skill_excluded=${skillBodiesExcluded} (add --include-skill-bodies)` : ''} shown=${shown} sort=${opts.sort}${opts.since ? ` since=${opts.since}` : ''}${opts.caseSensitive ? ' case_sensitive=true' : ''}${opts.excludeSessions.length ? ` excluded_sessions=[${opts.excludeSessions.join(',')}]` : ''}`;
   let wordStatsLine = wordStats ? `word_hits: ${truncate(wordStats, 300)} (of ${messagesScanned} messages searched after filters; high-count words are low-signal — prefer the rare ones)` : null;
   const hintLine = hint ? `hint: ${hint}` : null;
   const room = (withOmit) => opts.maxChars
@@ -585,17 +623,39 @@ function reduceSkillBody(msg) {
   return msg;
 }
 
-function parseMessages(raw, source) {
+function parseMessages(raw, source, overrides = {}) {
+  const includeTools = overrides.includeTools ?? opts.includeTools;
+  const includeSkillBodies = overrides.includeSkillBodies ?? opts.includeSkillBodies;
   const out = [];
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let obj;
     try { obj = JSON.parse(line); } catch { continue; }
-    const msg = ADAPTERS[source].message(obj, { includeTools: opts.includeTools });
+    const msg = ADAPTERS[source].message(obj, { includeTools });
     if (!msg || !msg.text.trim()) continue;
-    out.push(opts.includeSkillBodies ? msg : reduceSkillBody(msg));
+    out.push(includeSkillBodies ? msg : reduceSkillBody(msg));
   }
   return out;
+}
+
+// Predicate shared by the visible search and the excluded-match recount below:
+// same role/--since filtering, same literal/--any/--regex test, but without
+// touching wordDf/messagesScanned (those describe the visible population).
+function countMatching(messages, mtime) {
+  let n = 0;
+  for (const msg of messages) {
+    if (opts.role !== 'all' && msg.role !== opts.role) continue;
+    if (sinceTime != null) {
+      const time = timeOf(msg.timestamp) ?? timeOf(messages[0]?.timestamp) ?? mtime();
+      if (time < sinceTime) continue;
+    }
+    const haystack = opts.caseSensitive ? msg.text : msg.text.toLowerCase();
+    if (anyWords) {
+      if (!anyWords.some((w) => haystack.includes(w))) continue;
+    } else if (opts.regex ? !queryRegex.test(msg.text) : !haystack.includes(q)) continue;
+    n++;
+  }
+  return n;
 }
 
 function sessionId(file) {
@@ -914,6 +974,23 @@ async function selfTest() {
     check('--include-tools matches tool output', withTools.totalMatches === 1);
     const withoutTools = JSON.parse(run(['--query', 'ZEBRAECHO', '--json']));
     check('tool-only needle invisible by default', withoutTools.totalMatches === 0);
+    // #22: a miss caused only by tool exclusion must name the lever, on both the
+    // zero-hit path and a thin result — not read as "absent from the corpus".
+    check('zero-hit tool-only miss signals --include-tools',
+      withoutTools.excluded?.tools === 1 && /add --include-tools/.test(withoutTools.hint));
+    const thinTools = JSON.parse(run(['--query', 'flumoxide', '--json']));
+    check('thin result still reports matches hidden in tool blocks',
+      thinTools.totalMatches === 1 && thinTools.excluded?.tools === 1);
+    const thinText = run(['--query', 'flumoxide']);
+    check('text header carries the tools_excluded signal', /tools_excluded=1 \(add --include-tools\)/.test(thinText));
+    // #24: multi-word literal guidance is proactive — in the header on hits too —
+    // while matching semantics stay literal.
+    const multiText = run(['--query', 'flumoxide bug came']);
+    check('multi-word literal header advises --any proactively', /literal_multiword=true \(retry with --any/.test(multiText));
+    const multiJson = JSON.parse(run(['--query', 'flumoxide bug came', '--json']));
+    check('multi-word literal keeps literal semantics', multiJson.literalMultiword === true && multiJson.totalMatches === 1);
+    const singleJson = JSON.parse(run(['--query', 'flumoxide', '--json']));
+    check('single-term query carries no literal_multiword flag', !('literalMultiword' in singleJson));
 
     // --any: rarity ranking + dedupe
     const any = JSON.parse(run(['--query', 'sidebar flumoxide sidebar', '--any', '--json']));

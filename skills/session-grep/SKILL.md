@@ -158,6 +158,8 @@ For broad questions (summarize a session, what was X about) start with `--overvi
 then `--skim SESSION_ID`, then targeted `--query` for specifics. For fact questions:
 multi-word literal phrases almost never occur verbatim — use `--any` (matches any word,
 hits ranked by word rarity, per-word hit counts reported) or a single rare term.
+A multi-word literal query flags itself proactively in its own result header
+(`literal_multiword=true`); matching stays literal, so take the `--any` retry there.
 For discovery, add `--candidates`: grouping happens before `--limit` and `--max-chars`,
 so repeated hits from one transcript do not crowd out other matching sessions.
 Every hit is a pointer: to read around a promising hit, use `--session <id> --at <idx>`
@@ -207,6 +209,13 @@ compact previews and stable `id`/`idx` pointers for drill-in.
 For scoped chronology, compare `total_message_matches` with `shown`. If evidence was
 omitted, stay inside the same session and reduce `--before`/`--after`, use `--sort oldest`,
 or raise the aperture before drawing a complete timeline.
+
+Excluded-content accounting: zero-hit and thin results report matches hidden behind the
+default exclusions — `tools_excluded=N (add --include-tools)` /
+`skill_excluded=N (add --include-skill-bodies)` in the text header,
+`excluded: { tools, skillBodies }` in JSON — whenever non-zero, with the zero-hit hint
+naming the flag too. `total_message_matches` counts visible hits only, so a zero there
+plus an excluded count means "re-run with the flag", not "absent from the corpus".
 
 Summarize the hits; do not paste long transcript blocks. Give source, id/path, timestamp,
 and the compact context needed to understand what happened around the match.
