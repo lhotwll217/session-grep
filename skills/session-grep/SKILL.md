@@ -110,23 +110,27 @@ token, so the default 8k budget is roughly 2k tokens per call.
 tier 4 on the best hit. Don't open tier 2 on multiple sessions when one tier-3
 query would locate the session and the evidence at once.
 
-**Score semantics:** `--any` scores are computed against per-run statistics, so they
-are comparable within one result set but NEVER across invocations. To compare
-candidate terms, put them in one `--any` query instead of comparing scores from
-two runs.
+**Score semantics:** `--any` scores are BM25 over per-run statistics (IDF, saturated
+term frequency, length normalization), so they are comparable within one result set
+but NEVER across invocations. Remaining ties break by recency (newest, or oldest
+when `--sort oldest`), then session id and index. To compare candidate terms, put
+them in one `--any` query instead of comparing scores from two runs.
 
-**Budget semantics and their costs:** the byte ceiling is absolute, and three
+**Budget semantics and their costs:** the byte ceiling is absolute, and four
 deliberate trade-offs enforce it. (1) Selection is a strict rank-order prefix:
-each hit renders at a fixed size and selection stops at the first hit that does
-not fit — so raising `--max-chars` only ever ADDS hits (safe retry), at the cost
-of occasionally showing one hit fewer than aggressive squeezing could. (2) Under
-a near-floor budget the `word_hits` table is dropped before any evidence is —
-metadata is advisory and comes back on a bigger-budget re-run. (3) As a last
-resort the sole shown hit may have its context shed, text shrunk, and path
-visibly truncated (`...`); the `id`/`idx` pointer always stays valid — drill in
-with `--session ID --at IDX`, don't parse truncated paths. These degradations
-only engage near the 500-byte floor; at the default budgets none of them fire —
-prefer raising the budget over running at the floor.
+when several hits compete, each is capped to one-third of the budget (otherwise a
+fair share) and selection stops at the first hit that does not fit — so raising
+`--max-chars` only ever ADDS hits or lengthens previews (safe retry). An oversized
+match is truncated around the matching span, not from the start, so the hit stays
+visible. (2) Identical match text from forked/resumed sessions collapses onto the
+earliest copy, with `+N forked copies` on that pointer, so the budget is not spent
+replaying one message. (3) Under a near-floor budget the `word_hits` table is
+dropped before any evidence is — metadata is advisory and comes back on a
+bigger-budget re-run. (4) As a last resort the sole shown hit may have its context
+shed, text shrunk, and path visibly truncated (`...`); the `id`/`idx` pointer
+always stays valid — drill in with `--session ID --at IDX`, don't parse truncated
+paths. These degradations only engage near the 500-byte floor; at the default
+budgets none of them fire — prefer raising the budget over running at the floor.
 
 ## Retrieval principle
 
@@ -157,9 +161,9 @@ node session-grep.mjs --sources-file ./sources.json --target-type codex --query 
 For broad questions (summarize a session, what was X about) start with `--overview`,
 then `--skim SESSION_ID`, then targeted `--query` for specifics. For fact questions:
 multi-word literal phrases almost never occur verbatim — use `--any` (matches any word,
-hits ranked by word rarity, per-word hit counts reported) or a single rare term.
-A multi-word literal query flags itself proactively in its own result header
-(`literal_multiword=true`); matching stays literal, so take the `--any` retry there.
+hits ranked by rarity, term frequency, and length; per-word hit counts reported) or a
+single rare term. A multi-word literal query flags itself proactively in its own result
+header (`literal_multiword=true`); matching stays literal, so take the `--any` retry there.
 For discovery, add `--candidates`: grouping happens before `--limit` and `--max-chars`,
 so repeated hits from one transcript do not crowd out other matching sessions.
 Every hit is a pointer: to read around a promising hit, use `--session <id> --at <idx>`
@@ -172,8 +176,8 @@ Common flags:
 
 - `--query TEXT` literal query, or a JavaScript regex pattern when `--regex` is set; the query may itself begin with dashes, such as `--units`
 - `--query TEXT --session ID_PREFIX` search only inside one known stable session, returning normal `id`/`idx` evidence pointers
-- `--any` match ANY query word; whitespace and `|` both delimit terms; hits ranked by summed word rarity (IDF); reports per-word hit counts so you learn which words are low-signal
-- `--candidates` group all ranked message hits by stable session ID before limiting/budgeting; returns one best `id`/`best_idx` pointer plus the session's total hit count
+- `--any` match ANY query word; whitespace and `|` both delimit terms; hits ranked by BM25 (rarity + term frequency + length) with recency as the tie-break; reports per-word hit counts so you learn which words are low-signal
+- `--candidates` group all ranked message hits by stable session ID before limiting/budgeting; returns one best `id`/`best_idx` pointer (the highest-ranked hit in that session, not the longest) plus the session's total hit count
 - `--regex` treat `--query` as a JavaScript regular expression; matching is case-insensitive by default, and a common leading `(?i)` is accepted for grep compatibility
 - `--overview` no query needed: one compact digest per session (id, dates, message counts, opening prompt)
 - `--skim ID_PREFIX` no query needed: one session's user/assistant conversation, head/tail kept, middle sampled to the output budget
@@ -181,7 +185,7 @@ Common flags:
 - `--limit N` max matching messages, default 20; use a high number for "all"
 - `--before N` messages before each hit, default 1
 - `--after N` messages after each hit, default 1
-- `--role user|assistant|all` filter matching messages, default `all`
+- `--role user|assistant|all` filter matching messages, default `all`. `--role assistant` skips user-side harness wrappers and review prompts that otherwise dominate keyword-dense `--candidates` BEST hits; use it when the answer lives in the assistant turn.
 - `--target-type claude|codex|pi|all` narrow to one or more parser/source types, default `all`; repeatable
 - `--source claude|codex|pi|all` accepted as a compatibility alias for `--target-type`
 - `--since today|Nd|YYYY-MM-DD` filter by message/session timestamp
@@ -203,8 +207,9 @@ Common flags:
 ## Output rules
 
 Query previews share the global `--max-chars` aperture across ranked entries. Small result
-sets therefore return complete short match messages when they fit; busy result sets retain
-compact previews and stable `id`/`idx` pointers for drill-in.
+sets therefore return complete short match messages when they fit; competing oversized hits
+keep the matching span and leave room for siblings. Busy result sets retain compact
+previews and stable `id`/`idx` pointers for drill-in.
 
 For scoped chronology, compare `total_message_matches` with `shown`. If evidence was
 omitted, stay inside the same session and reduce `--before`/`--after`, use `--sort oldest`,

@@ -129,8 +129,8 @@ function bytes(s) {
 }
 
 // --any: multi-word phrases rarely occur verbatim in transcripts, so match ANY word
-// and rank by how many distinct words a message hits. Low-signal words are dropped
-// from the word set so common glue doesn't dominate the ranking.
+// and rank with BM25 over per-run df (rarity, saturated TF, length). Low-signal
+// words are dropped from the word set so common glue doesn't dominate the ranking.
 const STOPWORDS = new Set(['the', 'and', 'was', 'were', 'did', 'does', 'you', 'your', 'why', 'how', 'what', 'when', 'where', 'which', 'who', 'for', 'that', 'this', 'with', 'from', 'have', 'has', 'had', 'are', 'not', 'but', 'about', 'into', 'out', 'our', 'they', 'them', 'then', 'than', 'its', 'get', 'got', 'can', 'could', 'would', 'should', 'ever', 'any', 'all', 'some', 'there']);
 let anyWords = null;
 if (opts.any) {
@@ -323,6 +323,9 @@ let messagesScanned = 0;
 // construction — a new content exclusion adds one recount stage and one key here.
 let toolsExcluded = 0;
 let skillBodiesExcluded = 0;
+let textLenSum = 0;
+const BM25_K1 = 1.4;
+const BM25_B = 0.75;
 
 for (const file of files) {
   const source = sourceOf(file);
@@ -342,12 +345,16 @@ for (const file of files) {
       if (time < sinceTime) continue;
     }
     messagesScanned++;
+    const dl = Math.max(1, msg.text.length);
+    textLenSum += dl;
     const haystack = opts.caseSensitive ? msg.text : msg.text.toLowerCase();
     let hitWords = null;
+    let termFreq = null;
     if (anyWords) {
       hitWords = anyWords.filter((w) => haystack.includes(w));
       for (const w of hitWords) wordDf[w]++;
       if (!hitWords.length) continue;
+      termFreq = Object.fromEntries(hitWords.map((w) => [w, countOccurrences(haystack, w)]));
     } else if (opts.regex ? !queryRegex.test(msg.text) : !haystack.includes(q)) continue;
     time ??= timeOf(msg.timestamp) ?? timeOf(messages[0]?.timestamp) ?? mtime();
     matches.push({
@@ -357,7 +364,8 @@ for (const file of files) {
       index: i,
       timestamp: msg.timestamp,
       time,
-      ...(anyWords ? { matchedWords: hitWords } : {}),
+      dl,
+      ...(anyWords ? { matchedWords: hitWords, termFreq } : {}),
       before: messages.slice(Math.max(0, i - opts.before), i),
       match: msg,
       after: messages.slice(i + 1, i + 1 + opts.after),
@@ -379,18 +387,39 @@ for (const file of files) {
   }
 }
 
-// With --any, rank by summed word rarity (IDF): a hit on one rare identifier beats a
-// hit on three ubiquitous words. Recency breaks ties, then id/index so equal-time
-// hits from different files order deterministically across runs.
+// With --any, rank by BM25 over the per-run df table: IDF plus term-frequency
+// saturation and length normalization, so a short message about a rare term beats a
+// long one that happens to mention it. Recency breaks remaining ties (newest unless
+// --sort oldest), then id/index so equal-time hits order deterministically.
 const stable = (a, b) => a.id.localeCompare(b.id) || a.index - b.index;
+const recency = (a, b) => (opts.sort === 'oldest' ? a.time - b.time : b.time - a.time);
+const byRank = (a, b) => {
+  if (anyWords) return (b.score ?? 0) - (a.score ?? 0) || recency(a, b) || stable(a, b);
+  if (opts.sort === 'oldest') return a.time - b.time || stable(a, b);
+  if (opts.sort === 'newest') return b.time - a.time || stable(a, b);
+  return 0;
+};
 if (anyWords) {
-  const idf = (w) => Math.log((messagesScanned + 1) / (wordDf[w] + 1));
-  for (const m of matches) m.score = round3(m.matchedWords.reduce((t, w) => t + idf(w), 0));
-  matches.sort((a, b) => b.score - a.score || (opts.sort === 'oldest' ? a.time - b.time : b.time - a.time) || stable(a, b));
-} else if (opts.sort === 'newest') matches.sort((a, b) => b.time - a.time || stable(a, b));
-else if (opts.sort === 'oldest') matches.sort((a, b) => a.time - b.time || stable(a, b));
-const candidates = opts.candidates ? groupCandidates(matches) : null;
-const rankedEntries = candidates ?? matches;
+  const avgdl = textLenSum / Math.max(1, messagesScanned);
+  // Lucene-style positive IDF: a term that hits every scanned message still has
+  // weight, so length normalization can separate a short on-topic hit from a long
+  // mention. log((N+1)/(df+1)) would be 0 in that case and ranking would collapse
+  // to recency.
+  const idf = (w) => Math.log(1 + (messagesScanned - wordDf[w] + 0.5) / (wordDf[w] + 0.5));
+  const tfWeight = (tf, dl) => {
+    const norm = BM25_K1 * (1 - BM25_B + BM25_B * (dl / Math.max(avgdl, 1)));
+    return (tf * (BM25_K1 + 1)) / (tf + norm);
+  };
+  for (const m of matches) {
+    m.score = round3(m.matchedWords.reduce((t, w) => t + idf(w) * tfWeight(m.termFreq[w] || 1, m.dl), 0));
+  }
+}
+matches.sort(byRank);
+// Fork/resume transcripts replay the same message under new session ids. Collapse
+// identical match text onto the earliest copy so the budget buys distinct evidence.
+const collapsed = collapseForks(matches, byRank);
+const candidates = opts.candidates ? groupCandidates(collapsed) : null;
+const rankedEntries = candidates ?? collapsed;
 const limited = rankedEntries.slice(0, opts.limit);
 
 // Zero hits should steer the next query, not dead-end the agent: multi-word literal
@@ -407,7 +436,7 @@ const excludedPointer = [
 ].filter(Boolean).join('; ');
 const hintBase = !limited.length
   ? (literalMultiword
-      ? 'no hits: multi-word phrases rarely occur verbatim in transcripts — retry with --any (matches any word, ranked by words matched), or grep ONE rare term (an identifier, error string, or filename)'
+      ? 'no hits: multi-word phrases rarely occur verbatim in transcripts — retry with --any (matches any word, ranked by rarity and length), or grep ONE rare term (an identifier, error string, or filename)'
       : opts.any
         ? 'no hits for any query word: try different, rarer words (identifiers, error strings, filenames), or loosen --since/--role filters'
         : 'no hits: try a rarer single term, or --any with several candidate words')
@@ -424,9 +453,9 @@ const wordStats = anyWords
 // caller's context. The REAL header, word_hits, hint, and omission lines are charged
 // against the budget (not a fixed allowance), then hits are selected in rank order.
 // Two invariants:
-//  - Monotone: entries render at a fixed size for a given invocation shape, so
-//    selection is a strict rank-order prefix — raising the budget can only extend
-//    the emitted set, never reshuffle it.
+//  - Monotone: when several hits compete, each is capped to one-third of the budget
+//    (and otherwise a fair share), so raising --max-chars can only extend the emitted
+//    set or lengthen previews — never reshuffle or evict an earlier hit.
 //  - Evidence outranks metadata: whenever the fixed lines can't fit (zero-hit df
 //    tables included) the word_hits table is dropped, and before returning shown=0
 //    with matches present the top hit is hard-shrunk (text first, path last).
@@ -442,15 +471,29 @@ const CONTEXT_PREVIEW_CHARS = 180;
 const MIN_MATCH_PREVIEW_CHARS = 300;
 const ENTRY_OVERHEAD_CHARS = 220;
 const HEADER_ALLOWANCE_ESTIMATE = 300;
-const entryShare = Math.max(
-  MIN_MATCH_PREVIEW_CHARS,
-  Math.floor((opts.maxChars - HEADER_ALLOWANCE_ESTIMATE) / Math.max(1, limited.length)),
-);
+const competing = Math.max(1, limited.length);
+const fairShare = Math.floor((opts.maxChars - HEADER_ALLOWANCE_ESTIMATE) / competing);
+const maxHitShare = competing > 1
+  ? Math.max(MIN_MATCH_PREVIEW_CHARS, Math.floor(opts.maxChars / 3))
+  : Math.max(MIN_MATCH_PREVIEW_CHARS, opts.maxChars - HEADER_ALLOWANCE_ESTIMATE);
+const entryShare = Math.min(maxHitShare, Math.max(MIN_MATCH_PREVIEW_CHARS, fairShare));
 const matchPreviewChars = (entry) => Math.max(
   MIN_MATCH_PREVIEW_CHARS,
   entryShare - ENTRY_OVERHEAD_CHARS -
     (opts.candidates ? 0 : entry.before.length + entry.after.length) * (CONTEXT_PREVIEW_CHARS + 20),
 );
+const matchNeedle = (entry) => {
+  if (anyWords && entry.matchedWords?.length) {
+    return entry.matchedWords.reduce((best, w) => (wordDf[w] <= wordDf[best] ? w : best));
+  }
+  if (opts.regex && queryRegex) {
+    const found = queryRegex.exec(entry.match.text);
+    queryRegex.lastIndex = 0;
+    return found?.[0] ?? queryPattern;
+  }
+  return opts.query;
+};
+const previewMatch = (entry, room = matchPreviewChars(entry)) => truncateAround(entry.match.text, room, matchNeedle(entry));
 
 function selectWithinBudget(renderLen, budget) {
   const emitted = [];
@@ -475,7 +518,7 @@ function forceOneHit(renderLen, budget) {
         before: [],
         after: [],
         path: pathMax === Infinity ? m.path : truncate(m.path, pathMax),
-        match: { ...m.match, text: truncate(m.match.text, room) },
+        match: { ...m.match, text: previewMatch(m, room) },
       };
       if (renderLen(cand) <= budget) return [cand];
     }
@@ -485,9 +528,10 @@ function forceOneHit(renderLen, budget) {
 
 if (opts.json) {
   const slim = (msg, chars) => ({ role: msg.role, text: truncate(msg.text, chars), timestamp: msg.timestamp });
+  const forks = (m) => (m.forkCopies ? { forkCopies: m.forkCopies } : {});
   const toEntry = opts.candidates
-    ? (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, hitCount: m.hitCount, ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, match: slim(m.match, matchPreviewChars(m)) })
-    : (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, before: m.before.map((message) => slim(message, CONTEXT_PREVIEW_CHARS)), match: slim(m.match, matchPreviewChars(m)), after: m.after.map((message) => slim(message, CONTEXT_PREVIEW_CHARS)) });
+    ? (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, hitCount: m.hitCount, ...forks(m), ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, match: { role: m.match.role, text: previewMatch(m), timestamp: m.match.timestamp } })
+    : (m) => ({ source: m.source, id: m.id, index: m.index, timestamp: m.timestamp, ...forks(m), ...(anyWords ? { matchedWords: m.matchedWords, score: m.score } : {}), path: m.path, before: m.before.map((message) => slim(message, CONTEXT_PREVIEW_CHARS)), match: { role: m.match.role, text: previewMatch(m), timestamp: m.match.timestamp }, after: m.after.map((message) => slim(message, CONTEXT_PREVIEW_CHARS)) });
   const entryLen = (m) => bytes(JSON.stringify(toEntry(m))) + 1;
   let withStats = !!anyWords;
   // Worst-case envelope (max shown/omitted digits, omission note included, trailing
@@ -513,17 +557,18 @@ if (opts.json) {
   }
   console.log(JSON.stringify(envelope(emitted.map(toEntry), emitted.length, limited.length - emitted.length)));
 } else {
+  const forkNote = (m) => (m.forkCopies ? ` +${m.forkCopies} forked copies` : '');
   const renderLines = opts.candidates
     ? (m) => [
-        `${m.source} id=${m.id} best_idx=${m.index} hits=${m.hitCount} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] best_score=${m.score}` : ''}`,
+        `${m.source} id=${m.id} best_idx=${m.index} hits=${m.hitCount} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] best_score=${m.score}` : ''}${forkNote(m)}`,
         `path=${m.path}`,
-        `  BEST ${m.match.role}: ${truncate(m.match.text, matchPreviewChars(m))}`,
+        `  BEST ${m.match.role}: ${previewMatch(m)}`,
       ]
     : (m) => [
-        `${m.source} id=${m.id} idx=${m.index} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] score=${m.score}` : ''}`,
+        `${m.source} id=${m.id} idx=${m.index} ts=${m.timestamp ?? ''}${anyWords ? ` matched=[${m.matchedWords.join(',')}] score=${m.score}` : ''}${forkNote(m)}`,
         `path=${m.path}`,
         ...m.before.map((b) => `  before ${b.role}: ${truncate(b.text, CONTEXT_PREVIEW_CHARS)}`),
-        `  MATCH ${m.match.role}: ${truncate(m.match.text, matchPreviewChars(m))}`,
+        `  MATCH ${m.match.role}: ${previewMatch(m)}`,
         ...m.after.map((a) => `  after  ${a.role}: ${truncate(a.text, CONTEXT_PREVIEW_CHARS)}`),
       ];
   // "\n[N] " between entries grows with the hit number — charge the widest it can get.
@@ -579,6 +624,7 @@ function groupCandidates(sortedMatches) {
         matchedWords: [],
         hitCount: 0,
         match: match.match,
+        ...(match.forkCopies ? { forkCopies: match.forkCopies } : {}),
       };
       grouped.set(match.id, candidate);
     }
@@ -588,6 +634,54 @@ function groupCandidates(sortedMatches) {
     }
   }
   return [...grouped.values()];
+}
+
+function countOccurrences(haystack, word) {
+  if (!word) return 0;
+  let n = 0;
+  let i = 0;
+  while ((i = haystack.indexOf(word, i)) !== -1) {
+    n++;
+    i += word.length;
+  }
+  return n;
+}
+
+function contentKey(match) {
+  const norm = match.match.text.replace(/\s+/g, ' ').trim();
+  const text = opts.caseSensitive ? norm : norm.toLowerCase();
+  // Source is part of the key: the same sentence in Claude vs Codex is two
+  // transcripts, not a resume. Fork/resume copies share a parser.
+  return `${match.source}\0${text}`;
+}
+
+function collapseForks(ranked, cmp) {
+  const groups = new Map();
+  for (const match of ranked) {
+    const key = contentKey(match);
+    const group = groups.get(key);
+    if (group) group.push(match);
+    else groups.set(key, [match]);
+  }
+  if (groups.size === ranked.length) return ranked;
+  const kept = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      kept.push(group[0]);
+      continue;
+    }
+    let ancestor = group[0];
+    let best = group[0];
+    for (const match of group) {
+      if (match.time < ancestor.time || (match.time === ancestor.time && stable(match, ancestor) < 0)) ancestor = match;
+      if (cmp(match, best) < 0) best = match;
+    }
+    kept.push({ ...ancestor, forkCopies: group.length - 1, score: best.score, rankTime: best.time });
+  }
+  return kept.sort((a, b) => cmp(
+    { ...a, time: a.rankTime ?? a.time },
+    { ...b, time: b.rankTime ?? b.time },
+  ));
 }
 
 function sourceOf(file) {
@@ -847,6 +941,48 @@ function truncate(s, n) {
   let cut = oneLine.slice(0, end);
   if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
   return `${cut}...`;
+}
+
+function truncateAround(s, n, needle) {
+  const oneLine = s.replace(/\s+/g, ' ').trim();
+  if (Buffer.byteLength(oneLine) <= n) return oneLine;
+  if (n <= 3) return '...';
+  const hay = opts.caseSensitive ? oneLine : oneLine.toLowerCase();
+  const key = needle ? (opts.caseSensitive ? String(needle) : String(needle).toLowerCase()) : '';
+  const focus = key ? hay.indexOf(key) : -1;
+  if (focus < 0) return truncate(s, n);
+
+  let lo = focus;
+  let hi = Math.min(oneLine.length, focus + key.length);
+  const cost = (left, right) => {
+    let c = Buffer.byteLength(oneLine.slice(left, right));
+    if (left > 0) c += 3;
+    if (right < oneLine.length) c += 3;
+    return c;
+  };
+  if (cost(lo, hi) > n) {
+    const clipped = truncate(oneLine.slice(lo), n - (lo > 0 ? 3 : 0));
+    return lo > 0 ? `...${clipped}` : clipped;
+  }
+
+  const prev = (i) => (i > 1 && /[\uDC00-\uDFFF]/.test(oneLine[i - 1]) ? i - 2 : i - 1);
+  const next = (i) => (i < oneLine.length && /[\uD800-\uDBFF]/.test(oneLine[i]) ? Math.min(oneLine.length, i + 2) : i + 1);
+  while (lo > 0 || hi < oneLine.length) {
+    const nextLo = lo > 0 ? prev(lo) : lo;
+    const nextHi = hi < oneLine.length ? next(hi) : hi;
+    const canLeft = lo > 0 && cost(nextLo, hi) <= n;
+    const canRight = hi < oneLine.length && cost(lo, nextHi) <= n;
+    if (!canLeft && !canRight) break;
+    const leftSpan = focus - lo;
+    const rightSpan = hi - (focus + key.length);
+    if (canLeft && (!canRight || leftSpan <= rightSpan)) lo = nextLo;
+    else hi = nextHi;
+  }
+  let out = oneLine.slice(lo, hi);
+  if (/[\uD800-\uDBFF]$/.test(out)) out = out.slice(0, -1);
+  if (lo > 0) out = `...${out}`;
+  if (hi < oneLine.length) out = `${out}...`;
+  return out;
 }
 
 function timeOf(value) {
@@ -1138,6 +1274,39 @@ async function selfTest() {
     const window = skRun(['--session', 'skillinj', '--at', '2', '--before', '2', '--after', '0']);
     check('reduced body keeps the index aligned', /\[skill body omitted: demo-skill\]/.test(window)
       && /QUOKKAWORD appears here/.test(window));
+
+    // Ranking + output-budget policy: forks collapse, BM25 prefers short hits,
+    // oversized previews keep the match span, --candidates BEST is the best score.
+    const rkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-grep-rank-'));
+    const rkRun = (args) => runRaw([...args, '--root', rkDir]);
+    const sharedFork = 'FORKNEEDLE confirmed the form-fill event and the tool-result loop.';
+    fs.writeFileSync(path.join(rkDir, 'ancestor.jsonl'), line('assistant', text(sharedFork), '2026-04-06T21:26:18Z'));
+    fs.writeFileSync(path.join(rkDir, 'resume1.jsonl'), line('assistant', text(sharedFork), '2026-04-10T17:29:13Z'));
+    fs.writeFileSync(path.join(rkDir, 'other.jsonl'), line('assistant', text('FORKNEEDLE UNIQUEFORK later'), '2026-04-11T09:00:00Z'));
+    const forks = JSON.parse(rkRun(['--query', 'FORKNEEDLE', '--json', '--max-chars', '4000']));
+    check('fork copies collapse onto the ancestor', forks.totalMatches === 3 && forks.shown === 2
+      && forks.matches.some((m) => m.id === 'ancestor' && m.forkCopies === 1)
+      && forks.matches.some((m) => m.match.text.includes('UNIQUEFORK')));
+    fs.writeFileSync(path.join(rkDir, 'short.jsonl'), line('assistant', text('rankoxide'), '2026-06-01T10:00:00Z'));
+    fs.writeFileSync(path.join(rkDir, 'long.jsonl'), line('assistant', text(`${'padding '.repeat(800)} rankoxide ${'padding '.repeat(800)}`), '2026-06-02T10:00:00Z'));
+    const ranked = JSON.parse(rkRun(['--query', 'rankoxide', '--any', '--json', '--max-chars', '8000']));
+    const shortHit = ranked.matches.find((m) => m.id === 'short');
+    const longHit = ranked.matches.find((m) => m.id === 'long');
+    check('BM25 prefers a short hit over a newer long mention', shortHit && longHit && shortHit.score > longHit.score);
+    const blob = `STARTTOKEN ${'padding '.repeat(2000)} OVERSIZEHIT MIDFACT ${'padding '.repeat(2000)}`;
+    fs.writeFileSync(path.join(rkDir, 'huge-a.jsonl'), line('assistant', text(blob), '2026-07-01T10:00:00Z'));
+    fs.writeFileSync(path.join(rkDir, 'huge-b.jsonl'), line('assistant', text(blob.replace('MIDFACT', 'MIDFACT-B')), '2026-07-02T10:00:00Z'));
+    const huge = JSON.parse(rkRun(['--query', 'OVERSIZEHIT', '--json', '--before', '0', '--after', '0', '--max-chars', '12000']));
+    check('oversized hits keep the match span and share the aperture', huge.shown >= 2
+      && huge.matches.every((m) => m.match.text.includes('OVERSIZEHIT') && !m.match.text.includes('STARTTOKEN'))
+      && huge.matches.every((m) => Buffer.byteLength(m.match.text) <= 4000));
+    fs.writeFileSync(path.join(rkDir, 'wrapped.jsonl'),
+      line('assistant', text('wrapoxide is the spawnSync cause'), '2026-08-01T10:00:00Z')
+      + line('user', text(`${'Untrusted agent history for review. '.repeat(80)} wrapoxide once.`), '2026-08-01T10:00:05Z'));
+    const best = JSON.parse(rkRun(['--query', 'wrapoxide', '--any', '--candidates', '--json']));
+    const wrapped = best.candidates.find((c) => c.id === 'wrapped');
+    check('--candidates BEST is the short on-topic hit', wrapped?.match.role === 'assistant' && /spawnSync/.test(wrapped.match.text));
+
     const spine = run(['--skim', 'aaaa1111', '--max-chars', '900']);
     check('skim rendered output stays within byte budget', Buffer.byteLength(spine) <= 900);
     check('skim keeps head', spine.includes('number 0'));
