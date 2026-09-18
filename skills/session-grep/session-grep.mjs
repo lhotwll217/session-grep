@@ -14,9 +14,9 @@ function expandHome(p) {
 }
 
 const args = process.argv.slice(2);
+const DAY_MS = 24 * 60 * 60 * 1000;
 const opts = { limit: 20, before: 1, after: 1, role: 'all', sort: 'newest', json: false, regex: false, roots: [], targetTypes: [], targetRoots: [], excludeRe: [], excludeSessions: [], maxChars: 8000 };
-// One registry for every flag: the parser and --help both read it, so a flag cannot
-// exist without its description. [flag, argument or null, description, apply].
+// [flag, argument or null, description, apply] — the parser and --help share it.
 const FLAGS = [
   ['--query', 'TEXT', 'literal query, or a JavaScript regex with --regex; the text may itself begin with dashes', (v) => { opts.query = v; }],
   ['--any', null, 'match ANY query word (whitespace or | delimit terms); BM25-ranked, per-word hit counts reported', () => { opts.any = true; }],
@@ -33,7 +33,7 @@ const FLAGS = [
   ['--after', 'N', 'messages after each hit, default 1 (5 in --session/--at)', (v) => { opts.after = Number(v); opts.afterSet = true; }],
   ['--role', 'user|assistant|all', 'filter matching messages, default all', (v) => { opts.role = v; }],
   ['--since', 'today|Nd|YYYY-MM-DD', 'only messages at or after this time', (v) => { opts.since = v; }],
-  ['--until', 'today|Nd|YYYY-MM-DD', 'only messages before this time; a date means before the end of that day', (v) => { opts.until = v; }],
+  ['--until', 'today|Nd|YYYY-MM-DD', 'upper bound on message time, inclusive of the day or period named', (v) => { opts.until = v; }],
   ['--sort', 'newest|oldest|file', 'output order, default newest (--any ranks by score first)', (v) => { opts.sort = v; }],
   ['--target-type', 'claude|codex|pi|all', 'narrow to parser/source types (repeatable)', (v) => { opts.targetTypes.push(v); }],
   ['--source', 'claude|codex|pi|all', 'alias for --target-type', (v) => { opts.targetTypes.push(v); }],
@@ -323,12 +323,7 @@ files = files.filter((f) => !isExcluded(f) && !isExcludedSession(f)).sort();
 // the header is computed: raw_files_with_hits must describe files actually searched,
 // not files counted then skipped in the match loop.
 if (targetTypes.size) files = files.filter((f) => targetTypes.has(sourceOf(f)));
-// A file last written before --since holds no message inside the window (message
-// times fall back to mtime when absent), so skip it before reading it. One stat per
-// file replaces a full parse; --overview prunes the same way.
-if (sinceTime != null) {
-  files = files.filter((f) => { try { return fs.statSync(f).mtimeMs >= sinceTime; } catch { return false; } });
-}
+if (sinceTime != null) files = filesWrittenSince(files, sinceTime);
 const matches = [];
 const q = opts.caseSensitive ? opts.query : opts.query.toLowerCase();
 // Proactive query-shape signal (#24): a multi-word literal almost never occurs
@@ -341,10 +336,6 @@ const literalMultiword = !opts.any && !opts.regex && opts.query.trim().split(/\s
 // filters so word_hits describes the population the caller actually sees.
 const wordDf = anyWords ? Object.fromEntries(anyWords.map((w) => [w, 0])) : null;
 let messagesScanned = 0;
-// Excluded-match accounting (#22): per-exclusion extra hits hiding behind the
-// default filters, counted after ranking and only for thin results (see below).
-// Extensible by construction — a new content exclusion adds one recount stage and
-// one key here.
 let toolsExcluded = 0;
 let skillBodiesExcluded = 0;
 let textLenSum = 0;
@@ -360,9 +351,7 @@ for (const file of files) {
   const messages = messagesFrom(records, source);
   let fileMtime = null; // timestamp fallback, one stat per file not per message
   const mtime = () => (fileMtime ??= fs.statSync(file).mtimeMs);
-  // Fork/resume descendants replay the ancestor's prefix, so they share message 0.
-  // Unrelated sessions that merely repeat a common line do not.
-  const opening = normalizeForKey(messages[0]?.text ?? '');
+  const forkFamilyKey = normalizeForKey(messages[0]?.text ?? '');
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (opts.role !== 'all' && msg.role !== opts.role) continue;
@@ -393,7 +382,7 @@ for (const file of files) {
       timestamp: msg.timestamp,
       time,
       dl,
-      opening,
+      forkFamilyKey,
       ...(anyWords ? { matchedWords: hitWords, termFreq } : {}),
       before: messages.slice(Math.max(0, i - opts.before), i),
       match: msg,
@@ -438,30 +427,8 @@ const rankedEntries = candidates ?? collapsed;
 const limited = rankedEntries.slice(0, opts.limit);
 const filesWithMatches = new Set(matches.map((m) => m.path)).size;
 
-// Excluded-match accounting (#22) is only actionable on a thin result: a zero or
-// under-filled set is where "absent from the corpus" and "hidden behind a flag"
-// look identical. A result that already fills --limit gets no recount, because the
-// hidden count is a corpus-wide constant there (tool output is ~45% of bytes) and
-// the recount would re-parse every prefilter-eligible file to report it.
-if (rankedEntries.length < opts.limit && (!opts.includeTools || !opts.includeSkillBodies)) {
-  for (const file of files) {
-    const source = sourceOf(file);
-    let raw;
-    try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
-    const records = parseRecords(raw);
-    let fileMtime = null;
-    const mtime = () => (fileMtime ??= fs.statSync(file).mtimeMs);
-    // One stage per exclusion so the signal stays attributable.
-    const base = countMatching(messagesFrom(records, source), mtime);
-    const toolsLifted = countMatching(messagesFrom(records, source, { includeTools: true }), mtime);
-    if (!opts.includeTools) toolsExcluded += Math.max(0, toolsLifted - base);
-    if (!opts.includeSkillBodies) {
-      const allLifted = countMatching(
-        messagesFrom(records, source, { includeTools: true, includeSkillBodies: true }), mtime);
-      skillBodiesExcluded += Math.max(0, allLifted - Math.max(toolsLifted, base));
-    }
-  }
-}
+const resultIsThin = rankedEntries.length < opts.limit;
+if (resultIsThin && (!opts.includeTools || !opts.includeSkillBodies)) recountExcludedMatches(files);
 
 // Zero hits should steer the next query, not dead-end the agent: multi-word literal
 // phrases almost never occur verbatim in transcripts — say so and point at --any.
@@ -525,8 +492,6 @@ const matchPreviewChars = (entry) => Math.max(
 );
 const matchNeedle = (entry) => {
   if (anyWords && entry.matchedWords?.length) {
-    // A candidate's matchedWords is the session's union; bestMatchedWords are the
-    // ones in the BEST message itself, which is the text being centred.
     const pool = entry.bestMatchedWords ?? entry.matchedWords;
     return pool.reduce((best, w) => (wordDf[w] <= wordDf[best] ? w : best));
   }
@@ -681,6 +646,36 @@ function groupCandidates(sortedMatches) {
   return [...grouped.values()];
 }
 
+// A message with no timestamp falls back to its file's mtime, so a file last written
+// before the window holds nothing inside it. One stat replaces a full parse.
+// What the default exclusions hid, per exclusion so the caller learns which flag to
+// add. Only a thin result asks for it: a full one hides the same corpus-wide share
+// every time, and answering costs a reparse of every prefilter-eligible file.
+function recountExcludedMatches(candidates) {
+  for (const file of candidates) {
+    const source = sourceOf(file);
+    let raw;
+    try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    const records = parseRecords(raw);
+    let fileMtime = null;
+    const mtime = () => (fileMtime ??= fs.statSync(file).mtimeMs);
+    const visible = countMatching(messagesFrom(records, source), mtime);
+    const toolsLifted = countMatching(messagesFrom(records, source, { includeTools: true }), mtime);
+    if (!opts.includeTools) toolsExcluded += Math.max(0, toolsLifted - visible);
+    if (!opts.includeSkillBodies) {
+      const allLifted = countMatching(
+        messagesFrom(records, source, { includeTools: true, includeSkillBodies: true }), mtime);
+      skillBodiesExcluded += Math.max(0, allLifted - Math.max(toolsLifted, visible));
+    }
+  }
+}
+
+function filesWrittenSince(candidates, cutoff) {
+  return candidates.filter((file) => {
+    try { return fs.statSync(file).mtimeMs >= cutoff; } catch { return false; }
+  });
+}
+
 function countOccurrences(haystack, word) {
   if (!word) return 0;
   let n = 0;
@@ -698,11 +693,9 @@ function normalizeForKey(text) {
 }
 
 function contentKey(match) {
-  // Source is part of the key: the same sentence in Claude vs Codex is two
-  // transcripts, not a resume. Fork/resume copies share a parser. The session's
-  // opening message is part of it too, so two unrelated sessions that happen to
-  // repeat one common line stay separate results instead of collapsing.
-  return `${match.source}\0${match.opening ?? ''}\0${normalizeForKey(match.match.text)}`;
+  // A fork replays its ancestor's prefix, so a copy shares both the parser and the
+  // session's first message. Same sentence under a different opening is a coincidence.
+  return `${match.source}\0${match.forkFamilyKey ?? ''}\0${normalizeForKey(match.match.text)}`;
 }
 
 function collapseForks(ranked, cmp) {
@@ -767,9 +760,8 @@ function reduceSkillBody(msg) {
   return msg;
 }
 
-// JSON.parse dominates the cost on multi-MB transcripts, and the excluded-match
-// recount needs the same lines under different exclusion settings. Parse once per
-// file, then build each view from the records in hand.
+// JSON.parse dominates on multi-MB transcripts and every exclusion view needs the
+// same lines, so callers parse once and build each view from the records.
 function parseRecords(raw) {
   const out = [];
   for (const line of raw.split('\n')) {
@@ -1055,21 +1047,19 @@ function timeOf(value) {
   return Number.isFinite(t) ? t : null;
 }
 
-// --until is an exclusive upper bound: a date means the end of that day.
+// --until is an exclusive upper bound that includes the period it names, so
+// `--since today --until today` is today and `--until 2026-05-03` keeps that date.
 function parseUntil(value) {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const start = Date.parse(`${value}T00:00:00`);
-    return Number.isNaN(start) ? null : start + 24 * 60 * 60 * 1000;
-  }
-  if (value === 'today') return Date.now();
-  return parseSince(value);
+  const start = parseSince(value);
+  if (start == null) return null;
+  return /^\d+d$/.test(value) ? start : start + DAY_MS;
 }
 
 function parseSince(value) {
   const now = new Date();
   if (value === 'today') return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const days = value.match(/^(\d+)d$/);
-  if (days) return now.getTime() - Number(days[1]) * 24 * 60 * 60 * 1000;
+  if (days) return now.getTime() - Number(days[1]) * DAY_MS;
   if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return Date.parse(`${value}T00:00:00`);
   return null;
 }

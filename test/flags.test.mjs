@@ -54,12 +54,23 @@ test('--help exits 0 and describes every flag the parser accepts', () => {
   assert.match(dangling.stderr, /--query requires TEXT/);
 });
 
-test('--until excludes messages at or after its bound; a date means end of that day', { skip }, () => {
+test('--until includes the period it names and excludes everything after', { skip }, () => {
   const upToMay3 = runJson(['--query', 'SPANWORD', '--until', '2026-05-03']);
   assert.deepEqual(upToMay3.matches.map((m) => m.id), ['early']);
   const throughMay4 = runJson(['--query', 'SPANWORD', '--until', '2026-05-04']);
   assert.deepEqual(throughMay4.matches.map((m) => m.id).sort(), ['early', 'late']);
   assert.match(run(['--query', 'SPANWORD', '--until', '2026-05-03']), /until=2026-05-03/);
+  // 'today' is an end-of-period bound like a date, not the current instant, so a
+  // window of today includes a message written later today.
+  const ahead = join(root, 'proj', 'ahead.jsonl');
+  const soon = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  writeFileSync(ahead, claudeLine('assistant', 'SPANWORD written an hour from now', soon));
+  try {
+    const todayOnly = runJson(['--query', 'SPANWORD', '--since', 'today', '--until', 'today']);
+    assert.deepEqual(todayOnly.matches.map((m) => m.id), ['ahead']);
+  } finally {
+    rmSync(ahead, { force: true });
+  }
   const inverted = spawnSync(process.execPath, [GREP, '--query', 'x', '--since', '2026-05-04', '--until', '2026-05-02', '--root', root], { encoding: 'utf8' });
   assert.equal(inverted.status, 1);
   assert.match(inverted.stderr, /--until must be later than --since/);
