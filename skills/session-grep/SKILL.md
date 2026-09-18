@@ -76,7 +76,12 @@ The default routes live in `DEFAULT_SOURCES`, the source resolver lives in
 `sources.mjs`, and parser implementations live in `adapters/`.
 
 Format support lives in the `adapters/` folder next to the script — one file per
-tool, each exporting `{name, detect(file), message(record, opts)}`. Supporting a
+tool, each exporting `{name, detect(file), message(record, opts)}`. Reasoning traces
+are conversation text and always searched (Claude `thinking` blocks, Codex
+`agent_reasoning`; Codex encrypted `reasoning` stays skipped; Pi has no standalone
+reasoning records — only `thinking_level_change` config events). Adapter contract:
+every current and future adapter MUST surface readable reasoning traces; only
+encrypted/opaque reasoning stays skipped. Supporting a
 new JSONL-based tool means dropping one file in that folder (and adding a
 `--self-test` fixture); non-JSONL formats also need a reader change in the script.
 
@@ -188,7 +193,7 @@ Common flags:
 - `--max-chars N` output budget in BYTES (≈ chars for ASCII), default 8000 — a hard ceiling on rendered output; every line (headers and sampling markers included) is charged, and excess hits are omitted with a notice, never dumped
 - `--max-tokens N` the same budget denominated in tokens (4 bytes ≈ 1 token)
 - `--include-skill-bodies` also match inside injected slash-command skill bodies (excluded by default: invoking a command injects the whole SKILL.md into the transcript as a user message, ~12.8% of conversational bytes, and it matches its own vocabulary). The invocation event — the `<command-message>`/`<command-name>`/`<command-args>` record, including what you asked for — is never excluded.
-- `--include-tools` also match inside tool_result blocks (excluded by default: they are file/command echoes, ~45% of bytes, and mostly restate the conversation)
+- `--include-tools` also match inside tool_result blocks (excluded by default: they are file/command echoes, ~45% of bytes, and mostly restate the conversation). Reasoning traces are always searched, never gated behind this flag.
 - `--case-sensitive` exact case match, useful for all-caps searches
 - `--json` machine-readable output (compact, same truncation and budget as text)
 - `--self-test` verify the tool against a built-in synthetic corpus (no dependencies) — run this after copying the skill anywhere

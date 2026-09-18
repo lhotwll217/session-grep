@@ -887,6 +887,13 @@ async function selfTest() {
   fs.mkdirSync(path.join(dir, 'relocated-pi'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'relocated-pi', '2026-06-11T08-00-00_gggg4444.jsonl'),
     piLine('assistant', [{ type: 'text', text: 'relocatedpi reply from a configured pi root' }], '2026-06-11T08:00:00Z'));
+  // Reasoning traces: Claude plaintext thinking blocks + Codex agent_reasoning are
+  // conversation text (always searched); encrypted Codex reasoning stays skipped.
+  fs.writeFileSync(path.join(proj, 'rrrr6666.jsonl'),
+    JSON.stringify({ type: 'assistant', timestamp: '2026-06-12T08:00:00Z', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'SELFTEST-REASONHIT claude deliberation about the cache', signature: 'sig' }] } }) + '\n');
+  fs.appendFileSync(path.join(dir, 'codex', 'rollout-cccc.jsonl'),
+    JSON.stringify({ type: 'event_msg', timestamp: '2026-06-07T08:00:01Z', payload: { type: 'agent_reasoning', text: 'SELFTEST-REASONHIT codex deliberation about the cache' } }) + '\n' +
+    JSON.stringify({ type: 'response_item', timestamp: '2026-06-07T08:00:02Z', payload: { type: 'reasoning', summary: [], content: null, encrypted_content: 'SELFTEST-ENCRYPTEDNOISE' } }) + '\n');
 
   const runRaw = (args, env = {}) => execFileSync(process.execPath, [self, ...args], {
     encoding: 'utf8',
@@ -1086,6 +1093,14 @@ async function selfTest() {
     check('pi toolResult matches with --include-tools', piTools.totalMatches === 1 && piTools.matches[0].match.role === 'user');
     const piCustom = JSON.parse(run(['--query', 'PICUSTOM', '--json', '--include-tools']));
     check('pi non-conversation roles skipped', piCustom.totalMatches === 0);
+
+    // reasoning traces are conversation text: searched by default, never tool-gated
+    const reason = JSON.parse(run(['--query', 'SELFTEST-REASONHIT', '--json']));
+    check('claude thinking + codex agent_reasoning searchable by default',
+      reason.totalMatches === 2 && new Set(reason.matches.map((m) => m.source)).size === 2
+      && reason.matches.every((m) => m.match.role === 'assistant'));
+    const encrypted = JSON.parse(run(['--query', 'SELFTEST-ENCRYPTEDNOISE', '--json']));
+    check('encrypted codex reasoning stays skipped', encrypted.totalMatches === 0);
 
     // --exclude-re: path-based exclusion holds across search, browse, and window modes
     const excluded = JSON.parse(run(['--query', 'sidebar', '--json', '--exclude-re', 'aaaa1111']));

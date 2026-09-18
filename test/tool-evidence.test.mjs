@@ -27,3 +27,15 @@ test('nested Claude tool result and Codex function output are opt-in', () => {
     assert.match(adapter.message(record, { includeTools: true }).text, /loaded handoff skill/);
   }
 });
+
+test('reasoning traces are conversation text by default; encrypted reasoning stays skipped', () => {
+  const thinking = { type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'deliberation about the cache', signature: 'sig' }] } };
+  assert.match(claude.message(thinking, {}).text, /deliberation/);
+  const agentReasoning = { type: 'event_msg', payload: { type: 'agent_reasoning', text: 'deliberation about the cache' } };
+  const codexHit = codex.message(agentReasoning, {});
+  assert.equal(codexHit.role, 'assistant');
+  assert.match(codexHit.text, /deliberation/);
+  const encrypted = { type: 'response_item', payload: { type: 'reasoning', summary: [], content: null, encrypted_content: 'opaque' } };
+  assert.equal(codex.message(encrypted, {}), null);
+  assert.equal(codex.message(encrypted, { includeTools: true }), null);
+});

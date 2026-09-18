@@ -280,6 +280,37 @@ test('query can scope to one session while genuinely ambiguous modes fail closed
   }
 });
 
+test('reasoning traces are searchable by default; encrypted reasoning stays skipped', { skip: !hasRg && 'ripgrep not installed' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
+  try {
+    mkdirSync(join(root, 'proj'), { recursive: true });
+    mkdirSync(join(root, 'codex'), { recursive: true });
+    writeFileSync(
+      join(root, 'proj', 'reason.jsonl'),
+      JSON.stringify({ type: 'assistant', timestamp: '2026-06-01T10:00:00Z', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'REASONHIT claude deliberation about the cache', signature: 'sig' }] } }) + '\n' +
+        claudeLine('user', 'unrelated chatter', '2026-06-01T10:00:01Z'),
+    );
+    writeFileSync(
+      join(root, 'codex', 'rollout-reason.jsonl'),
+      JSON.stringify({ type: 'event_msg', timestamp: '2026-06-02T10:00:00Z', payload: { type: 'agent_reasoning', text: 'REASONHIT codex deliberation about the cache' } }) + '\n' +
+        JSON.stringify({ type: 'response_item', timestamp: '2026-06-02T10:00:01Z', payload: { type: 'reasoning', summary: [], content: null, encrypted_content: 'ENCRYPTEDNOISE' } }) + '\n' +
+        codexLine('assistant', 'unrelated codex chatter', '2026-06-02T10:00:02Z'),
+    );
+    const found = JSON.parse(
+      execFileSync(process.execPath, [GREP, '--query', 'reasonhit', '--root', root, '--json'], { encoding: 'utf8' }),
+    );
+    assert.equal(found.totalMatches, 2);
+    assert.deepEqual(new Set(found.matches.map((m) => m.source)), new Set(['claude', 'codex']));
+    assert.ok(found.matches.every((m) => m.match.role === 'assistant'));
+    const encrypted = JSON.parse(
+      execFileSync(process.execPath, [GREP, '--query', 'encryptednoise', '--root', root, '--json'], { encoding: 'utf8' }),
+    );
+    assert.equal(encrypted.totalMatches, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('typed sources file supports target root and target type narrowing', { skip: !hasRg && 'ripgrep not installed' }, () => {
   const root = mkdtempSync(join(tmpdir(), 'session-grep-test-'));
   try {
