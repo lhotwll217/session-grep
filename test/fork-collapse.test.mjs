@@ -53,6 +53,28 @@ test('fork family collapses onto the earliest copy with a suppressed count', { s
   assert.match(run(['--query', 'FORKNEEDLE', '--max-chars', '4000']), /\+2 forked copies/);
 });
 
+// The integration seam that caught this: three one-message sessions with byte-identical
+// text and no prefix before the hit. Keying on the opening message alone collapsed them
+// and kept the lowest id, silently dropping the other two.
+test('one-message sessions with identical text are not a fork family', { skip }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'session-grep-solo-'));
+  mkdirSync(join(dir, 'proj'), { recursive: true });
+  const same = 'here is the SOLONEEDLE you want';
+  for (const id of ['aaa', 'mmm', 'zzz']) {
+    writeFileSync(join(dir, 'proj', `${id}.jsonl`), claudeLine('user', same, '2026-06-30T10:00:00Z'));
+  }
+  try {
+    const out = JSON.parse(execFileSync(process.execPath,
+      [GREP, '--query', 'SOLONEEDLE', '--json', '--max-chars', '4000', '--root', dir], { encoding: 'utf8' }));
+    assert.equal(out.totalMatches, 3);
+    assert.equal(out.shown, 3);
+    assert.deepEqual(out.matches.map((m) => m.id).sort(), ['aaa', 'mmm', 'zzz']);
+    assert.ok(out.matches.every((m) => m.forkCopies === undefined));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('unrelated sessions sharing one line stay separate hits', { skip }, () => {
   const out = runJson(['--query', 'ACKWORD', '--max-chars', '4000']);
   assert.equal(out.totalMatches, 2);

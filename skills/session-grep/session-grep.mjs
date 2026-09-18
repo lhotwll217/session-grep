@@ -15,6 +15,9 @@ function expandHome(p) {
 
 const args = process.argv.slice(2);
 const DAY_MS = 24 * 60 * 60 * 1000;
+// Module constants used by top-level code live here: a const beside its function sits
+// in the temporal dead zone when argument handling runs.
+const PREFIX_SEED = 2166136261;
 const opts = { limit: 20, before: 1, after: 1, role: 'all', sort: 'newest', json: false, regex: false, roots: [], targetTypes: [], targetRoots: [], excludeRe: [], excludeSessions: [], maxChars: 8000 };
 // [flag, argument or null, description, apply] — the parser and --help share it.
 const FLAGS = [
@@ -351,9 +354,13 @@ for (const file of files) {
   const messages = messagesFrom(records, source);
   let fileMtime = null; // timestamp fallback, one stat per file not per message
   const mtime = () => (fileMtime ??= fs.statSync(file).mtimeMs);
-  const forkFamilyKey = normalizeForKey(messages[0]?.text ?? '');
+  // A resume replays its ancestor's messages, so the evidence that two sessions are
+  // copies is the prefix they share before the hit. Accumulated as we walk the file.
+  let replayedPrefix = PREFIX_SEED;
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
+    const replayedPrefixHere = replayedPrefix;
+    replayedPrefix = extendPrefix(replayedPrefix, msg.text);
     if (opts.role !== 'all' && msg.role !== opts.role) continue;
     let time = null;
     if (sinceTime != null || untilTime != null) {
@@ -382,7 +389,7 @@ for (const file of files) {
       timestamp: msg.timestamp,
       time,
       dl,
-      forkFamilyKey,
+      replayedPrefix: replayedPrefixHere,
       ...(anyWords ? { matchedWords: hitWords, termFreq } : {}),
       before: messages.slice(Math.max(0, i - opts.before), i),
       match: msg,
@@ -687,6 +694,18 @@ function countOccurrences(haystack, word) {
   return n;
 }
 
+// FNV-1a over each message in turn: cheap, order-sensitive, and accumulated in one
+// pass so a file with many hits does not re-read its own prefix per hit.
+function extendPrefix(hash, text) {
+  const norm = normalizeForKey(text);
+  let h = hash;
+  for (let i = 0; i < norm.length; i++) {
+    h ^= norm.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
 function normalizeForKey(text) {
   const norm = text.replace(/\s+/g, ' ').trim();
   return opts.caseSensitive ? norm : norm.toLowerCase();
@@ -695,12 +714,15 @@ function normalizeForKey(text) {
 function contentKey(match) {
   // A fork replays its ancestor's prefix, so a copy shares both the parser and the
   // session's first message. Same sentence under a different opening is a coincidence.
-  return `${match.source}\0${match.forkFamilyKey ?? ''}\0${normalizeForKey(match.match.text)}`;
+  return `${match.source}\0${match.replayedPrefix}\0${normalizeForKey(match.match.text)}`;
 }
 
 function collapseForks(ranked, cmp) {
   const groups = new Map();
   for (const match of ranked) {
+    // No prefix means nothing was replayed, so two sessions sharing only this message
+    // are a coincidence, not a fork family.
+    if (match.replayedPrefix === PREFIX_SEED) { groups.set(`\0solo\0${groups.size}`, [match]); continue; }
     const key = contentKey(match);
     const group = groups.get(key);
     if (group) group.push(match);
@@ -1348,10 +1370,22 @@ async function selfTest() {
     // oversized previews keep the match span, --candidates BEST is the best score.
     const rkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-grep-rank-'));
     const rkRun = (args) => runRaw([...args, '--root', rkDir]);
+    // A resume replays the ancestor's prefix, so each copy carries the same opening
+    // turn before the shared message. Without that prefix there is no fork evidence.
     const sharedFork = 'FORKNEEDLE confirmed the form-fill event and the tool-result loop.';
-    fs.writeFileSync(path.join(rkDir, 'ancestor.jsonl'), line('assistant', text(sharedFork), '2026-04-06T21:26:18Z'));
-    fs.writeFileSync(path.join(rkDir, 'resume1.jsonl'), line('assistant', text(sharedFork), '2026-04-10T17:29:13Z'));
+    const replay = (ts) => line('user', text('Trace the terminal form-fill event'), ts)
+      + line('assistant', text(sharedFork), ts);
+    fs.writeFileSync(path.join(rkDir, 'ancestor.jsonl'), replay('2026-04-06T21:26:18Z'));
+    fs.writeFileSync(path.join(rkDir, 'resume1.jsonl'), replay('2026-04-10T17:29:13Z'));
     fs.writeFileSync(path.join(rkDir, 'other.jsonl'), line('assistant', text('FORKNEEDLE UNIQUEFORK later'), '2026-04-11T09:00:00Z'));
+    // Two one-message sessions with identical text share no replayed prefix, so they
+    // are a coincidence and must both survive.
+    fs.writeFileSync(path.join(rkDir, 'solo-a.jsonl'), line('user', text('SOLOPAIR standalone question'), '2026-04-12T09:00:00Z'));
+    fs.writeFileSync(path.join(rkDir, 'solo-b.jsonl'), line('user', text('SOLOPAIR standalone question'), '2026-04-13T09:00:00Z'));
+    const solos = JSON.parse(rkRun(['--query', 'SOLOPAIR', '--json', '--max-chars', '4000']));
+    check('identical one-message sessions are not a fork family',
+      solos.totalMatches === 2 && solos.shown === 2
+      && solos.matches.every((m) => m.forkCopies === undefined));
     const forks = JSON.parse(rkRun(['--query', 'FORKNEEDLE', '--json', '--max-chars', '4000']));
     check('fork copies collapse onto the ancestor', forks.totalMatches === 3 && forks.shown === 2
       && forks.matches.some((m) => m.id === 'ancestor' && m.forkCopies === 1)
