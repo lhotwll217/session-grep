@@ -22,9 +22,9 @@ const JEV_MAX_CANDIDATES = 20;
 const JEV_MAX_QUERY_BYTES = 512;
 const JEV_MAX_EXCERPT_BYTES = 1000;
 const JEV_MAX_STDIN_BYTES = 32 * 1024;
-// 15 verified answers all scored >= 0.82; 0.7 loses one once run-to-run spread (<= 0.21) counts.
+// 15 verified answers all scored >= 0.89; 0.7 loses one once run-to-run spread (<= 0.21) counts.
 const JEV_RELEVANCE_FLOOR = 0.5;
-// Below ten candidates the median call drops nothing (0 at K<=8, 1 at K=10, 5 at K=20).
+// Below ten candidates the median call drops nothing (0 at K<=8, 1 at K=10, 5.5 at K=20).
 const JEV_MIN_POOL = 10;
 let jevDroppedCount = 0;
 let jevFilterSkipped = null;
