@@ -28,9 +28,17 @@ Hosts and launchers are not transcript formats. Roots are keyed by adapter `type
 
 ## First run on a machine
 
-Only needed when a search reports `sources=defaults` and this machine keeps transcripts
-somewhere the built-in roots do not cover. Once a config is in effect the header says
-nothing and there is nothing to redo, so this is not a step to repeat per session.
+A search prints `sources=defaults` when no source config is in effect. That field is the
+switch. It has one on position and two off positions, and nothing to judge:
+
+- **on** — no config exists. Every search prints the field. Do the steps below.
+- **off** — a config exists and lists the roots this machine should search.
+- **off** — a config exists and lists exactly the built-in roots, which records that the
+  defaults were checked and are right.
+
+Writing the file flips it and the field never appears again. There is no per-session
+check, no second condition, and no state kept beyond that one file. Do not judge whether
+this machine "needs" it: if the field prints, it has not been done.
 
 ```bash
 node session-grep.mjs --list-roots                     # note origin= and every root
