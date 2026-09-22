@@ -37,7 +37,7 @@ const runJson = (args) => JSON.parse(run([...args, '--json']));
 test('--help exits 0 and describes every flag the parser accepts', () => {
   const res = spawnSync(process.execPath, [GREP, '--help'], { encoding: 'utf8' });
   assert.equal(res.status, 0);
-  for (const flag of ['--query', '--any', '--candidates', '--regex', '--session', '--at', '--focus', '--overview', '--skim',
+  for (const flag of ['--query', '--any', '--candidates', '--rerank', '--regex', '--session', '--at', '--focus', '--overview', '--skim',
     '--list-roots', '--limit', '--before', '--after', '--role', '--since', '--until', '--sort', '--target-type', '--source',
     '--root', '--sources-file', '--target-root', '--exclude-session', '--exclude-re', '--max-chars', '--max-tokens',
     '--include-tools', '--include-skill-bodies', '--case-sensitive', '--json', '--self-test']) {

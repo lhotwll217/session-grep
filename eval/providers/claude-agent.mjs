@@ -59,6 +59,12 @@ Search them with the session-grep tool:
   node ${GREP_BIN} --query TEXT --root transcripts [flags]
 Flags: --any (multi-word query: matches ANY word, hits ranked by how many words match — use this when you have several candidate terms), --regex (JS regex query), --limit N (default 20), --before N / --after N (messages of context around each hit, default 1), --role user|assistant|all, --since today|Nd|YYYY-MM-DD, --sort newest|oldest, --case-sensitive, --max-chars N (output budget, default 8000), --json.
 
+Grouping: --candidates (with --query) groups hits by session and returns one best pointer per session, so you see distinct sessions rather than many hits from one.
+
+FIRST SEARCH, every question: start grouped, with several candidate terms from the question:
+  node SCRIPT --query "term1 term2 term3 term4" --any --candidates --limit 10 --root transcripts
+Read which sessions come back, then drill into the promising one with --session ID --at IDX before any narrower search.
+
 Browse modes (no --query needed):
   --overview                    one-line digest per session: id, dates, sizes, opening prompt
   --skim SESSION_ID_PREFIX     the conversation of ONE session, sampled to fit the budget
@@ -69,6 +75,16 @@ Browse modes (no --query needed):
 Strategy: for broad questions (summarize a session, how could X have gone better, what was session Y about) start with --overview, then --skim on the right session — and remember a skim is a SAMPLE of the conversation, so verify key claims with targeted probes before answering. For fact questions: a multi-word literal query almost never matches — use --any for multi-word searches, or a single rare term (identifier, error string, unusual noun). Issue several small targeted searches rather than one broad one. The raw .jsonl files are enormous and ~98% tool-call noise; do not cat/Read them wholesale.
 
 ${COMMON_RULES}`;
+
+// Identical to the skill arm but for one instruction, so a paired run attributes the
+// difference to --filter jev and nothing else.
+const JEV_ARM_PROMPT = SKILL_ARM_PROMPT.replace(
+  '--any --candidates --limit 10 --root transcripts',
+  '--any --candidates --filter jev --limit 10 --root transcripts',
+).replace(
+  'Read which sessions come back,',
+  'Always keep --filter jev on that grouped search: it drops sessions a relevance model scores irrelevant and leaves the rest in lexical order, so the budget is spent on sessions that can answer the question. Read which sessions come back,',
+);
 
 const NAIVE_ARM_PROMPT = `You answer questions about past AI coding sessions recorded as JSONL transcripts in ./transcripts (June-July 2026). Sessions may come from different tools (Claude Code, Codex CLI).
 
@@ -87,6 +103,10 @@ const ARMS = {
     systemPrompt: SKILL_ARM_PROMPT,
     // Cover the invocation forms agents actually produce (absolute and relative);
     // a missed prefix reads as a permission denial and haiku gives up.
+    allowedTools: `${BASE_TOOLS},Bash(node ${GREP_BIN}*),Bash(node skills/session-grep/session-grep.mjs*),Bash(node ../skills/session-grep/session-grep.mjs*),Bash(node ../../skills/session-grep/session-grep.mjs*)`,
+  },
+  'session-grep-jev': {
+    systemPrompt: JEV_ARM_PROMPT,
     allowedTools: `${BASE_TOOLS},Bash(node ${GREP_BIN}*),Bash(node skills/session-grep/session-grep.mjs*),Bash(node ../skills/session-grep/session-grep.mjs*),Bash(node ../../skills/session-grep/session-grep.mjs*)`,
   },
   'naive-grep': {
@@ -169,14 +189,18 @@ export default class ClaudeAgentProvider {
 
     const logDir = path.join(repoRoot, 'eval', 'results', 'logs', runStamp);
     fs.mkdirSync(logDir, { recursive: true });
-    const logFile = path.join(logDir, `${slug(caseId)}.${this.arm}.${model}.jsonl`);
+    // --repeat runs the same (case, arm, model) several times; without a suffix each
+    // repeat overwrote the last, leaving only one trajectory to diagnose a flaky case.
+    const logBase = path.join(logDir, `${slug(caseId)}.${this.arm}.${model}`);
+    let logFile = `${logBase}.jsonl`;
+    for (let repeat = 2; fs.existsSync(logFile); repeat++) logFile = `${logBase}.r${repeat}.jsonl`;
     fs.writeFileSync(logFile, lines.join('\n') + '\n');
 
     if (!result) {
       return {
         error: spawnError ?? (timedOut ? `claude run timed out after ${timeoutMs}ms` : `claude run produced no result envelope; stderr: ${stderrTail || '(empty)'}`),
         output: '',
-        metadata: { arm: this.arm, toolCalls, toolResultChars, logFile, stderrTail },
+        metadata: { arm: this.arm, toolCalls, toolResultChars, durationMs: result.duration_ms ?? 0, logFile, stderrTail },
       };
     }
 

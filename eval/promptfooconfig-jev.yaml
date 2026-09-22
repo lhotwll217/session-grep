@@ -1,0 +1,40 @@
+# Paired filter benchmark: does --filter jev change answer correctness or cost?
+# One variable — both arms get the same prompt, tools, model and cases; the jev arm
+# additionally instructs --filter jev on grouped searches. Haiku only, to keep the
+# paired run cheap; the grader is pinned separately in claude-grader.mjs.
+#
+# Run:   promptfoo eval -c eval/promptfooconfig-jev.yaml --no-cache
+# Then:  node eval/compare.mjs
+
+description: session-grep with vs without --filter jev (haiku)
+
+prompts:
+  - '{{question}}'
+
+providers:
+  - id: file://providers/claude-agent.mjs
+    label: session-grep|haiku
+    config: { arm: session-grep, model: claude-haiku-4-5-20251001, maxTurns: 25, maxBudgetUsd: 1.0 }
+  - id: file://providers/claude-agent.mjs
+    label: session-grep-jev|haiku
+    config: { arm: session-grep-jev, model: claude-haiku-4-5-20251001, maxTurns: 25, maxBudgetUsd: 1.0 }
+  - id: file://providers/claude-agent.mjs
+    label: naive-grep|haiku
+    config: { arm: naive-grep, model: claude-haiku-4-5-20251001, maxTurns: 25, maxBudgetUsd: 1.0 }
+
+defaultTest:
+  options:
+    provider: file://providers/claude-grader.mjs
+  assert:
+    - type: javascript
+      value: file://asserts/efficiency.mjs
+      metric: efficiency_telemetry
+
+tests: file://cases.yaml
+
+# A fixed path is overwritten by the next run. archive-run.mjs copies this to
+# eval/results/iterations/<runId>.json so a ledger entry keeps pointing at real data.
+outputPath: eval/results/jev-filter.json
+
+evaluateOptions:
+  maxConcurrency: 2

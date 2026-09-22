@@ -20,6 +20,7 @@ look wrong: read [ONBOARDING.md](ONBOARDING.md).
 
 ```bash
 node session-grep.mjs --query "sidebar poll triage membership" --any --candidates --since 7d
+node session-grep.mjs --query "sidebar poll triage membership" --any --candidates --rerank jev --limit 10
 node session-grep.mjs --query "why did you" --since 7d --before 2 --after 2
 node session-grep.mjs --query "checkpoint" --session 269a
 node session-grep.mjs --session 269a --at 41
@@ -85,6 +86,32 @@ frequency, length), so scores compare within one result set and never across run
 Ties break by recency (newest, or oldest under `--sort oldest`), then session id and
 index. To compare candidate terms, put them in one `--any` query.
 
+`--rerank jev` reranks the first 20 grouped lexical candidates by semantic relevance.
+It requires `--any --candidates` and `--limit 20` or lower. `score` remains the lexical
+BM25 score. `semanticScore` is Jev's finite relevance score. Equal semantic scores keep
+the lexical order. Scoring is per candidate: a candidate Jev could not score keeps its
+lexical rank, and the scored candidates reorder only among the positions they already
+hold, so one failed row never moves another. With nothing scored the result is the
+unchanged lexical order. session-grep sets no timeout of its own — `jev` bounds each
+request (`JEV_TIMEOUT_MS`, default 60s, with `JEV_MAX_RETRIES` retries). Set
+`SESSION_GREP_JEV_BIN` to select the executable.
+
+`--filter jev` scores the same pool but does not reorder it: candidates below 0.5 are
+dropped and the rest keep lexical order, with the count reported as `jev_dropped=` and
+`jevDropped`. A dropped candidate frees a slot rather than being replaced by an unscored
+one, so the result is shorter, not rebuilt. An unscored candidate is kept. Prefer this
+over `--rerank jev` for narrowing: on measured queries lexical order held up better than
+Jev's ordering, while Jev reliably identified irrelevance. The two cannot be combined.
+Jev is optional. When it is missing, cannot start, or returns nothing usable, the full
+lexical result is returned and `jev_filter_skipped=` names the reason, so an unfiltered
+result is never mistaken for a filtered one that found nothing. Pools under 10 candidates
+skip the call for the same reason, since below that size the median call drops nothing and
+only narrows evidence the agent re-searches for. The exit code is unaffected either way.
+The subprocess receives only the query and the best matching message excerpt. Each run
+caps the query at 512 bytes, each excerpt at 1,000 bytes, the batch at 20 sessions, and
+stdin at 32 KiB. It never receives session IDs, paths, timestamps, context messages,
+tool output, skill bodies, or transcript JSONL.
+
 **Budget.** The byte ceiling is absolute; every line is charged, and excess hits are
 omitted with a notice. Four trade-offs enforce it. (1) Selection is a strict rank-order
 prefix: competing hits are each capped to one-third of the budget and selection stops at
@@ -118,4 +145,5 @@ whose reason is not in that line:
   be combined with `--sources-file`.
 - `--exclude-re` applies to every mode, so a wrapper can enforce a path blacklist;
   `--exclude-session` follows canonical ids rather than filenames.
+- `--rerank jev` is opt-in. Install Jev separately or set `SESSION_GREP_JEV_BIN`.
 - `--self-test` after copying the skill anywhere.
