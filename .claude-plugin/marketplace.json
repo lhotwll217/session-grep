@@ -1,0 +1,18 @@
+{
+  "name": "session-grep",
+  "owner": {
+    "name": "Luke Otwell",
+    "url": "https://github.com/lhotwll217"
+  },
+  "description": "Search local AI coding-session transcripts with bounded output.",
+  "plugins": [
+    {
+      "name": "session-grep",
+      "source": ".",
+      "description": "Grep AI coding-session transcripts (Claude Code, Codex, Pi) with bounded message context — ranked any-word search, session overviews, sampled spines, drill-in pointers.",
+      "version": "0.1.1",
+      "license": "MIT",
+      "category": "workflows"
+    }
+  ]
+}

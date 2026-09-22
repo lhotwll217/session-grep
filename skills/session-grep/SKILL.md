@@ -146,4 +146,7 @@ whose reason is not in that line:
 - `--exclude-re` applies to every mode, so a wrapper can enforce a path blacklist;
   `--exclude-session` follows canonical ids rather than filenames.
 - `--rerank jev` is opt-in. Install Jev separately or set `SESSION_GREP_JEV_BIN`.
+- Roots resolve from `$SESSION_GREP_SOURCES_FILE` when set, else `DEFAULT_SOURCES`.
+  `--list-roots` prints which, as `origin=`. A map missing a store returns fewer sessions
+  and looks normal, so check it once per machine; ONBOARDING.md has the procedure.
 - `--self-test` after copying the skill anywhere.
