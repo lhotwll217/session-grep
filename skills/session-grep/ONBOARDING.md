@@ -28,8 +28,9 @@ Hosts and launchers are not transcript formats. Roots are keyed by adapter `type
 
 ## First run on a machine
 
-Do this once before trusting a search, and again whenever a host gains a new agent.
-A wrong map does not fail. It returns fewer sessions and looks normal.
+Only needed when a search reports `sources=defaults` and this machine keeps transcripts
+somewhere the built-in roots do not cover. Once a config is in effect the header says
+nothing and there is nothing to redo, so this is not a step to repeat per session.
 
 ```bash
 node session-grep.mjs --list-roots                     # note origin= and every root
