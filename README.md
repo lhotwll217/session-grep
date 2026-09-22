@@ -31,6 +31,8 @@ Invoke the script wherever the skill is vendored (shown here as `sg`):
 alias sg='node skills/session-grep/session-grep.mjs'
 sg --query "task_started" --before 2 --after 2      # exact term, bounded context
 sg --query "sidebar poll triage membership" --any   # multi-word: rarity-ranked, per-word hit counts
+sg --query "sidebar poll triage membership" --any --candidates --rerank jev --limit 10
+sg --query "sidebar poll triage membership" --any --candidates --filter jev --limit 10
 sg --overview                                       # one-line digest per session
 sg --skim 269a                                      # one session's conversation, sampled to budget
 sg --list-roots                                     # show configured source roots
@@ -42,6 +44,19 @@ default; `--root DIR` points anywhere, and `--exclude-re REGEX` (repeatable) rem
 any file whose path matches — the hook for enforcing a path blacklist from a wrapper.
 If sessions live elsewhere, see Sources below. Full flags and agent guidance:
 [skills/session-grep/SKILL.md](skills/session-grep/SKILL.md).
+
+`--rerank jev` adds semantic ordering after lexical candidate retrieval. It requires
+`--any --candidates`, a limit of at most 20, and `jev` on `PATH`. Set
+`SESSION_GREP_JEV_BIN` to use another executable path. session-grep sends Jev only a
+bounded query and one bounded candidate excerpt under synthetic IDs. A candidate Jev
+could not score keeps its lexical rank; with nothing scored the order is unchanged.
+Request timeouts and retries belong to `jev` (`JEV_TIMEOUT_MS`, `JEV_MAX_RETRIES`).
+
+`--filter jev` narrows instead of reordering: it drops candidates Jev scores below 0.5,
+keeps lexical order, and reports how many it removed. Use it to spend the output budget
+on relevant sessions rather than to re-rank them. Pools under 10 candidates skip the call,
+and a missing or failing `jev` returns the unfiltered result with `jev_filter_skipped=`
+naming why, rather than looking like a filter that found nothing.
 
 ## Sources
 
