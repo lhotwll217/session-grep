@@ -137,7 +137,8 @@ review prompts that otherwise dominate keyword-dense `--candidates` BEST hits.
 whose reason is not in that line:
 
 - `--include-tools` / `--include-skill-bodies` lift the default exclusions described under
-  Semantics; message indexes depend on them, so drill in with the setting the search used.
+  Semantics. Message indexes do not depend on them: a hidden tool entry keeps its number, so
+  an `idx` opens the same message with or without the flag.
 - `--role assistant` is the lever against user-side wrappers and review prompts (see
   Semantics).
 - `--target-root DIR` and `--target-type` keep the configured `{ type, root }` parser
