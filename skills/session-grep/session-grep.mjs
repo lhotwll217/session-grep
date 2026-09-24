@@ -272,31 +272,36 @@ if (opts.session && opts.at != null) {
   const file = allSessionFiles().find((f) => sessionId(f).startsWith(opts.session));
   if (!file) usage(1, `No session file matching id prefix "${opts.session}" under: ${roots.join(', ')}`);
   const messages = parseMessages(fs.readFileSync(file, 'utf8'), sourceOf(file));
-  if (opts.at >= messages.length) {
-    usage(1, `--at ${opts.at} out of range: session ${sessionId(file)} has ${messages.length} messages (0..${messages.length - 1}). Note: indexes depend on --include-tools — drill in with the same setting the search used.`);
+  const last = messages.at(-1)?.index ?? -1;
+  if (opts.at > last) {
+    usage(1, `--at ${opts.at} out of range: session ${sessionId(file)} has messages 0..${last}.`);
   }
+  // `at` is a stable index; `target` is its position in this view. A tool entry hidden by
+  // the current flags resolves to the next visible message, and the header says so.
+  const target = messages.findIndex((m) => m.index >= opts.at);
+  const hidden = messages[target].index !== opts.at;
   const b = opts.beforeSet ? opts.before : 5;
   const a = opts.afterSet ? opts.after : 5;
-  const from = Math.max(0, opts.at - b);
-  const to = Math.min(messages.length - 1, opts.at + a);
+  const from = Math.max(0, target - b);
+  const to = Math.min(messages.length - 1, target + a);
   // The header is budgeted too: a deep path must not bust a small budget on line one.
-  const head = truncate(`window id=${sessionId(file)} messages ${from}..${to} of ${messages.length} path=${file}`, opts.maxChars - 80);
+  const head = truncate(`window id=${sessionId(file)} messages ${messages[from].index}..${messages[to].index} of ${last + 1}${hidden ? ` (${opts.at} is a tool entry; add --include-tools to see it)` : ''} path=${file}`, opts.maxChars - 80);
   console.log(head);
   const available = opts.maxChars - bytes(head) - 1 - 80; // 80: reserve for the truncation notice
   const lineFor = (i, cap) => {
     const m = messages[i];
-    const preview = i === opts.at && opts.focus != null ? truncateAround(m.text, cap, opts.focus) : truncate(m.text, cap);
-    return `[${i}]${i === opts.at ? '*' : ' '} ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${preview}`;
+    const preview = i === target && opts.focus != null ? truncateAround(m.text, cap, opts.focus) : truncate(m.text, cap);
+    return `[${m.index}]${m.index === opts.at ? '*' : ' '} ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${preview}`;
   };
   // Reserve the selected message first, then spend what remains on the nearest context.
   // Selection happens before chronological rendering, so a tight budget can never consume
   // five lead-in previews and throw away the stable pointer's actual evidence.
   const contextReserve = Math.min(2_000, Math.floor(opts.maxChars * 0.35));
   const targetCap = Math.max(80, available - contextReserve);
-  const selected = new Map([[opts.at, lineFor(opts.at, targetCap)]]);
-  let size = bytes(selected.get(opts.at)) + 1;
+  const selected = new Map([[target, lineFor(target, targetCap)]]);
+  let size = bytes(selected.get(target)) + 1;
   for (let distance = 1; selected.size < to - from + 1; distance++) {
-    const nearby = [opts.at - distance, opts.at + distance]
+    const nearby = [target - distance, target + distance]
       .filter((index) => index >= from && index <= to);
     if (!nearby.length) break;
     for (const index of nearby) {
@@ -311,7 +316,7 @@ if (opts.session && opts.at != null) {
     console.log(selected.get(index));
   }
   if (selected.size < to - from + 1) {
-    console.log(`... window context truncated by --max-chars; selected [${opts.at}] retained`);
+    console.log(`... window context truncated by --max-chars; selected [${messages[target].index}] retained`);
   }
   process.exit(0);
 }
@@ -417,7 +422,7 @@ for (const file of files) {
       source,
       id: sessionId(file),
       path: file,
-      index: i,
+      index: msg.index,
       timestamp: msg.timestamp,
       time,
       dl,
@@ -942,14 +947,21 @@ function parseRecords(raw) {
   return out;
 }
 
+// Every message carries one stable `index`: its position in the full view, tool entries
+// included. Hiding tool entries skips their numbers instead of renumbering, so an idx from
+// any search, skim, or external bookmark opens the same message whatever the flags.
 function messagesFrom(records, source, overrides = {}) {
   const includeTools = overrides.includeTools ?? opts.includeTools;
   const includeSkillBodies = overrides.includeSkillBodies ?? opts.includeSkillBodies;
   const out = [];
+  let position = 0;
   for (const obj of records) {
-    const msg = ADAPTERS[source].message(obj, { includeTools });
+    const full = ADAPTERS[source].message(obj, { includeTools: true });
+    if (!full || !full.text.trim()) continue;
+    const index = position++;
+    const msg = includeTools ? full : ADAPTERS[source].message(obj, { includeTools: false });
     if (!msg || !msg.text.trim()) continue;
-    out.push(includeSkillBodies ? msg : reduceSkillBody(msg));
+    out.push({ ...(includeSkillBodies ? msg : reduceSkillBody(msg)), index });
   }
   return out;
 }
@@ -1018,7 +1030,7 @@ function browse() {
     const file = files.find((f) => sessionId(f).startsWith(opts.skim));
     if (!file) usage(1, `No session file matching id prefix "${opts.skim}" under: ${roots.join(', ')}`);
     const messages = parseMessages(fs.readFileSync(file, 'utf8'), sourceOf(file));
-    const line = (m, i, cap) => `[${i}] ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${cap == null ? m.text.replace(/\s+/g, ' ').trim() : truncate(m.text, cap)}`;
+    const line = (m, _i, cap) => `[${m.index}] ${m.role}${m.timestamp ? ' ' + String(m.timestamp).slice(0, 16) : ''}: ${cap == null ? m.text.replace(/\s+/g, ' ').trim() : truncate(m.text, cap)}`;
     // The header is budgeted too: a deep path must not bust a small budget on line one.
     const header = truncate(`skim id=${sessionId(file)} messages=${messages.length} path=${file}`, opts.maxChars - 160);
     // A short conversation should be lossless: --max-chars is the actual aperture. The old
@@ -1688,7 +1700,18 @@ for (const row of rows) {
     const hit = JSON.parse(run(['--query', 'flumoxide', '--json'])).matches[0];
     const win = run(['--session', hit.id.slice(0, 6), '--at', String(hit.index)]);
     check('window centers on the hit', win.includes(`[${hit.index}]*`) && win.includes('flumoxide'));
-    check('window includes neighbors', win.includes(`[${hit.index - 1}] `) && win.includes(`[${hit.index + 1}] `));
+    const shownIndexes = [...win.matchAll(/^\[(\d+)\]/gm)].map((m) => Number(m[1]));
+    check('window includes neighbors', shownIndexes.some((i) => i < hit.index) && shownIndexes.some((i) => i > hit.index));
+    // Stable indexes: hiding tool entries skips their numbers instead of renumbering, so the
+    // same message has the same idx with or without --include-tools, and either idx opens it.
+    // "final closing message" sits after session alpha's tool entry, so renumbering would shift it.
+    const closing = (flags) => JSON.parse(run(['--query', 'final closing message', '--json', ...flags])).matches[0]?.index;
+    check('idx is the same with and without --include-tools', closing([]) != null && closing([]) === closing(['--include-tools']));
+    const winTools = run(['--session', hit.id.slice(0, 6), '--at', String(hit.index), '--include-tools']);
+    check('--include-tools window opens the same message', winTools.includes(`[${hit.index}]*`) && winTools.includes('flumoxide'));
+    const toolIdx = JSON.parse(run(['--query', 'ZEBRAECHO', '--json', '--include-tools'])).matches[0];
+    const hiddenWin = run(['--session', toolIdx.id.slice(0, 6), '--at', String(toolIdx.index)]);
+    check('a hidden tool entry idx resolves and says so', /is a tool entry; add --include-tools/.test(hiddenWin));
     const tightWin = run(['--session', 'hhhh5555', '--at', '6', '--before', '5', '--after', '0', '--max-chars', '500']);
     check('tight window always retains selected target', tightWin.includes('[6]*') && tightWin.includes('ANCHOR-TARGET'));
   } catch (error) {
